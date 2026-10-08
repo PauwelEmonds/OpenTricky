@@ -99,7 +99,7 @@ set(GAME_SOURCES
 if(WIN32)
     list(APPEND GAME_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/ssx_recomp.rc")
 else()
-    list(APPEND GAME_SOURCES src/host_sdl.c)
+    list(APPEND GAME_SOURCES src/host_sdl.c src/touch_sdl.c)
 endif()
 
 if(ANDROID)
@@ -146,7 +146,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     d3dcompiler
 )
 else()
-    find_package(SDL2 REQUIRED)
+    if(NOT TARGET SDL2::SDL2)
+        find_package(SDL2 REQUIRED)
+    endif()
     target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2 m)
     if(NOT ANDROID)
         target_link_libraries(${PROJECT_NAME} PRIVATE dl)

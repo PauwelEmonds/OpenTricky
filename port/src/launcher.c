@@ -590,7 +590,7 @@ BOOL launcher_check_iso(const char *path, char *why, size_t why_sz)
         snprintf(why, why_sz, "No disc image has been chosen.");
         return FALSE;
     }
-    fa = GetFileAttributesA(path);
+    fa = strncmp(path, "fd:", 3) ? GetFileAttributesA(path) : FILE_ATTRIBUTE_NORMAL;   /* fd: Android */
     if (fa == INVALID_FILE_ATTRIBUTES || (fa & FILE_ATTRIBUTE_DIRECTORY)) {
         snprintf(why, why_sz, "The disc image could not be found: %s", path);
         return FALSE;

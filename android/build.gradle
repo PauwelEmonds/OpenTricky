@@ -1,0 +1,4 @@
+// OpenTricky for Android: the port of ../port on SDL2 and OpenGL ES 3.0 (see docs/android.md).
+plugins {
+    id 'com.android.application' version '8.13.0' apply false
+}

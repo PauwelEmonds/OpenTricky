@@ -59,3 +59,12 @@ __pycache__/
 .idea/
 Thumbs.db
 .DS_Store
+
+# Android build output and local SDK path
+android/.gradle/
+android/app/build/
+android/app/.cxx/
+android/build/
+android/local.properties
+*.apk
+linux-gles-race-start.png

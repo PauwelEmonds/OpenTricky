@@ -25,6 +25,11 @@
 #include <unistd.h>
 #include <sched.h>
 #include <fenv.h>
+#include <signal.h>
+#include <sys/syscall.h>
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000     /* older headers; old kernels take it as a hint */
+#endif
 #include <sys/mman.h>
 #include <sys/sysinfo.h>
 
@@ -763,7 +768,11 @@ BOOL TerminateThread(HANDLE h, DWORD exitCode)
 {
     w32_object *o = obj_of(h);
     if (!o || o->kind != K_THREAD) return FALSE;
+#ifdef __ANDROID__
+    fprintf(stderr, "[W32] TerminateThread: not available on Android, thread left running\n");
+#else
     pthread_cancel(o->thread);
+#endif
     pthread_mutex_lock(&o->lock);
     o->exit_code = exitCode;
     o->exited    = 1;
@@ -1121,7 +1130,11 @@ VOID OutputDebugStringA(LPCSTR str)
 
 VOID ExitProcess(UINT exitCode) { exit((int)exitCode); }
 
-VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt) { explicit_bzero(ptr, cnt); }
+VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
+{
+    volatile unsigned char *p = (volatile unsigned char *)ptr;
+    while (cnt--) *p++ = 0;
+}
 
 unsigned int _clearfp(void)
 {
@@ -1380,7 +1393,11 @@ HANDLE CreateFileMappingA(HANDLE file, LPSECURITY_ATTRIBUTES sa, DWORD protect,
     SIZE_T size = ((SIZE_T)maxSizeHigh << 32) | maxSizeLow;
     if (size == 0) { SetLastError(ERROR_INVALID_PARAMETER); return NULL; }
 
+#ifdef __ANDROID__
+    int fd = (int)syscall(__NR_memfd_create, name ? name : "xbox_map", 0);
+#else
     int fd = memfd_create(name ? name : "xbox_map", 0);
+#endif
     if (fd < 0) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
     if (ftruncate(fd, (off_t)size) != 0) {
         close(fd);

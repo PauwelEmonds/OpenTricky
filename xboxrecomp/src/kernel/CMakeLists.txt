@@ -43,8 +43,7 @@ if(WIN32)
     target_link_libraries(xbox_kernel PUBLIC platform kernel32 bcrypt ws2_32 psapi xbox_nv2a)
 else()
     # Linux: platform layer (POSIX host primitives) + OpenSSL for crypto.
-    find_package(OpenSSL REQUIRED)
-    target_link_libraries(xbox_kernel PUBLIC platform OpenSSL::Crypto)
+    target_link_libraries(xbox_kernel PUBLIC platform)
 endif()
 
 if(MSVC)

@@ -37,6 +37,28 @@ static SDL_Window *s_window;
 
 void d3d8_SetHostWindow(void *sdl_window) { s_window = (SDL_Window *)sdl_window; }
 
+/* The app is in the background (Android): no surface to draw into. The
+ * renderer holds at its next present until the app is back, then makes its
+ * context current on the new surface. */
+static volatile LONG s_paused, s_resumed;
+void d3d8_SetHostPaused(int paused)
+{
+    if (paused) InterlockedExchange(&s_paused, 1);
+    else { InterlockedExchange(&s_resumed, 1); InterlockedExchange(&s_paused, 0); }
+}
+
+static void wait_while_paused(void)
+{
+    if (!s_paused && !s_resumed) return;
+    if (s_paused) fprintf(stderr, "[GLES] in the background: rendering paused\n");
+    while (s_paused) SDL_Delay(50);
+    if (InterlockedExchange(&s_resumed, 0)) {
+        SDL_GL_MakeCurrent(s_window, (SDL_GLContext)g_gl.context);
+        gles_invalidate_state();
+        fprintf(stderr, "[GLES] back in the foreground\n");
+    }
+}
+
 /* GL attributes the window must be created with (call before SDL_CreateWindow). */
 void d3d8_GlesWindowHints(void)
 {
@@ -423,6 +445,10 @@ static void fps_title(void)
     }
 }
 
+/* Drawn over the shown image, after the game (the host's touch controls). */
+static void (*s_overlay)(int w, int h);
+void d3d8_SetPresentOverlay(void (*fn)(int w, int h)) { s_overlay = fn; }
+
 static void host_present(void)
 {
     int dw = 0, dh = 0;
@@ -466,7 +492,9 @@ static void host_present(void)
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
         gles_blit(g_gl.scene_tex, (dw - rw) / 2, (dh - rh) / 2, rw, rh, 1, dac_lut_tex());
+        if (s_overlay) { s_overlay(dw, dh); gles_invalidate_state(); }
     }
+    wait_while_paused();
     SDL_GL_SwapWindow(s_window);
     glBindFramebuffer(GL_FRAMEBUFFER, gles_draw_target());
     gles_invalidate_state();

@@ -24,7 +24,17 @@
 #include <dlfcn.h>
 #include <sys/stat.h>
 
+#ifdef __ANDROID__
+#include <jni.h>
+#endif
+
 /* Renderer (xboxrecomp/src/d3d/gles). */
+void d3d8_SetHostPaused(int paused);
+void d3d8_SetPresentOverlay(void (*fn)(int w, int h));
+
+/* On-screen controls (touch_sdl.c). */
+void touch_event(const SDL_Event *e, int screen_w, int screen_h);
+void touch_draw(int w, int h);
 void d3d8_SetHostWindow(void *sdl_window);
 void d3d8_GlesWindowHints(void);
 int  d3d8_HostKey(unsigned vk);
@@ -85,15 +95,45 @@ void host_open_path(const char *path, BOOL folder)
 
 /* ---- the menu ------------------------------------------------------------ */
 
+#ifdef __ANDROID__
+/* OpenTrickyActivity.openDiscImage(forget): the disc image as an open file
+ * descriptor -- the one chosen before, or the system's file picker. */
+static int java_open_disc(int forget)
+{
+    JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
+    jobject act = (jobject)SDL_AndroidGetActivity();
+    int r = -2;
+    if (!env || !act) return -2;
+    jclass c = (*env)->GetObjectClass(env, act);
+    jmethodID m = (*env)->GetStaticMethodID(env, c, "openDiscImage", "(Z)I");
+    if (m) r = (*env)->CallStaticIntMethod(env, c, m, (jboolean)(forget ? JNI_TRUE : JNI_FALSE));
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); r = -2; }
+    (*env)->DeleteLocalRef(env, c);
+    (*env)->DeleteLocalRef(env, act);
+    return r;
+}
+#endif
+
 BOOL host_launcher_run(struct LauncherConfig *cfg)
 {
     char ini[1024];
+#ifdef __ANDROID__
+    /* A path in the .ini (a copy in the app's folder) is used as it is; else
+     * the disc image chosen in the system's file picker. Asked again when
+     * the game found the last one unusable (it comes back here). */
+    static int asked;
+    if (cfg->iso[0] && strncmp(cfg->iso, "fd:", 3) && !asked) { asked = 1; return TRUE; }
+    {
+        /* Back here after an "fd:" image: it was unusable, pick another. */
+        int fd = java_open_disc(asked++ && !strncmp(cfg->iso, "fd:", 3));
+        if (fd < 0) return FALSE;                  /* cancelled: the app closes */
+        snprintf(cfg->iso, sizeof cfg->iso, "fd:%d", fd);
+        return TRUE;
+    }
+#endif
     if (cfg->iso[0]) return TRUE;
     launcher_config_path(ini, sizeof ini);
 #ifdef __ANDROID__
-    /* The app's start screen writes DiscImage before the game is started. */
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "SSX Tricky",
-                             "No disc image is set. Choose your SSX Tricky (USA) .iso first.", s_win);
 #else
     fprintf(stderr, "No disc image is set. Put DiscImage=/path/to/SSX Tricky (USA).iso in [Game]\n"
                     "of %s, or start with the image on the command line.\n", ini);
@@ -291,6 +331,19 @@ static unsigned sdl_key_to_vk(SDL_Keycode k)
     return 0;
 }
 
+/* ---- the app in the background (Android) -------------------------------------
+ * Android takes the window's surface away while the app is not shown; the
+ * renderer waits instead of drawing into nothing, and picks the surface up
+ * again on return. Called on the thread that posts the event (SDL's Java
+ * side), so it reaches the renderer even while the main loop is blocked. */
+static int SDLCALL lifecycle_watch(void *ud, SDL_Event *e)
+{
+    (void)ud;
+    if (e->type == SDL_APP_WILLENTERBACKGROUND) d3d8_SetHostPaused(1);
+    else if (e->type == SDL_APP_DIDENTERFOREGROUND) d3d8_SetHostPaused(0);
+    return 1;
+}
+
 /* ---- the run ---------------------------------------------------------------- */
 
 static int (*s_game_main)(void);
@@ -332,6 +385,15 @@ int host_run(int (*game_main)(void))
     int w = 1280, h = 960, dw = 0, dh = 0;
     Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 
+#ifdef __ANDROID__
+    {   /* Android drops stdout and stderr: everything goes to the log in the
+         * app's folder, replaced at each start, for bug reports. */
+        char log[1100];
+        snprintf(log, sizeof log, "%s/SSX Tricky.log", host_data_dir());
+        if (freopen(log, "w", stdout)) setvbuf(stdout, NULL, _IONBF, 0);
+        if (freopen(log, "a", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
+    }
+#endif
     x11_threads();
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
@@ -372,6 +434,8 @@ int host_run(int (*game_main)(void))
         return 1;
     }
     d3d8_SetHostWindow(s_win);
+    SDL_AddEventWatch(lifecycle_watch, NULL);
+    d3d8_SetPresentOverlay(touch_draw);
 
     s_game_main = game_main;
     pthread_attr_init(&attr);
@@ -385,6 +449,11 @@ int host_run(int (*game_main)(void))
     for (;;) {
         SDL_Event e;
         if (!SDL_WaitEventTimeout(&e, 100)) continue;
+        {
+            int dw = 0, dh = 0;
+            SDL_GL_GetDrawableSize(s_win, &dw, &dh);
+            touch_event(&e, dw, dh);
+        }
         switch (e.type) {
         case SDL_QUIT:
             fflush(stdout);

@@ -3,6 +3,10 @@
  */
 
 #include "xbox_xdvdfs.h"
+#ifndef _WIN32
+#include <unistd.h>
+#include <stdlib.h>
+#endif
 #include "kernel.h"
 #include <stdio.h>
 #include <string.h>
@@ -204,6 +208,14 @@ BOOL xdvdfs_mount(const char *iso_path)
     if (!iso_path) return FALSE;
     xdvdfs_unmount();
 
+#ifndef _WIN32
+    /* "fd:N": an open file descriptor -- on Android the system's file picker
+     * hands the disc image over that way (a content URI, not a path). */
+    if (!strncmp(iso_path, "fd:", 3)) {
+        int fd = dup(atoi(iso_path + 3));
+        s_iso = fd >= 0 ? fdopen(fd, "rb") : NULL;
+    } else
+#endif
     s_iso = fopen(iso_path, "rb");
     if (!s_iso) return FALSE;
 
