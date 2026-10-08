@@ -812,7 +812,25 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          * width -- so each attempt actually lands somewhere new instead of
          * re-probing the same occupied neighborhood. */
         int found = 0;
+#ifndef _WIN32
+        /* POSIX (64-bit Linux, Android): reserve the whole 4 GB guest span
+         * -- RAM, its mirrors, the GPU aperture at +0xFD000000 -- in one
+         * piece wherever the OS has room, and build the layout inside it.
+         * Nothing else can then sit in a mirror slot, and no fixed low
+         * address has to be free (Android keeps them for itself). */
+        {
+            void *span = w32_reserve((SIZE_T)0x100000000ull, 0x10000);
+            if (span) {
+                g_memory_base = MapViewOfFileEx(g_mapping_handle, FILE_MAP_ALL_ACCESS, 0, 0,
+                                                g_memory_size, span);
+                if (g_memory_base == span) found = 1;
+                else g_memory_base = NULL;
+            }
+        }
+        for (int i = 0; i < num_try_bases && !found; i++) {
+#else
         for (int i = 0; i < num_try_bases; i++) {
+#endif
             uintptr_t hint_addr = try_bases[i];
             if (!xbox_probe_layout_free(hint_addr, g_memory_size)) {
                 fprintf(stderr, "  Base candidate 0x%p: skipped -- a mirror slot or the "

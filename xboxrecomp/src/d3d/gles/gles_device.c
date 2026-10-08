@@ -436,6 +436,21 @@ static void host_present(void)
     s_shot_path[0] = 0;
     pthread_mutex_unlock(&s_shot_lock);
     if (shot[0]) save_screenshot(shot);
+    {   /* OT_SHOT_DIR=<dir> [OT_SHOT_EVERY=n] (testing): a PNG of every n-th
+         * present, so a run can be checked without anyone watching it. */
+        static const char *dir = (const char *)-1;
+        static unsigned every;
+        if (dir == (const char *)-1) {
+            const char *e = getenv("OT_SHOT_EVERY");
+            dir = getenv("OT_SHOT_DIR");
+            every = (e && atoi(e) > 0) ? (unsigned)atoi(e) : 120u;
+        }
+        if (dir && g_present_seq && g_present_seq % every == 0) {
+            char p[1100];
+            snprintf(p, sizeof p, "%s/f%06u.png", dir, g_present_seq);
+            save_screenshot(p);
+        }
+    }
 
     SDL_GL_GetDrawableSize(s_window, &dw, &dh);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);

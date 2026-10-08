@@ -185,6 +185,10 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
 BOOL   VirtualFree(LPVOID address, SIZE_T size, DWORD freeType);
 BOOL   VirtualProtect(LPVOID address, SIZE_T size, DWORD newProtect, PDWORD oldProtect);
 
+/* Reserve `size` bytes of address space aligned to `align` (POSIX only):
+ * VirtualAlloc / MapViewOfFileEx inside it map at exactly the address asked. */
+void *w32_reserve(SIZE_T size, SIZE_T align);
+
 /* ---- Time ------------------------------------------------------------- */
 VOID  GetSystemTimeAsFileTime(LPFILETIME ft);
 VOID  GetSystemTime(LPSYSTEMTIME st);
@@ -701,6 +705,7 @@ static inline MMRESULT timeEndPeriod(UINT p)   { (void)p; return TIMERR_NOERROR;
 extern SHORT (*g_w32_async_key_state)(int vKey);
 extern DWORD (*g_w32_xinput_get_state)(DWORD idx, XINPUT_STATE *state);
 extern int   (*g_w32_message_box)(const char *text, const char *caption, UINT type);
+extern HWND  (*g_w32_foreground_window)(void);   /* the game window when it has focus */
 
 /* Window helpers the port touches outside the renderer. */
 HWND GetForegroundWindow(void);

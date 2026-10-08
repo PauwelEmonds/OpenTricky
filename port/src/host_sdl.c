@@ -180,6 +180,13 @@ static SHORT host_async_key_state(int vk)
     return k[sc] ? (SHORT)0x8000 : 0;
 }
 
+/* The game window when it has the keyboard (controls.c reads keys only then). */
+static HWND host_foreground_window(void)
+{
+    if (s_win && (SDL_GetWindowFlags(s_win) & SDL_WINDOW_INPUT_FOCUS)) return (HWND)s_win;
+    return NULL;
+}
+
 /* ---- controllers ----------------------------------------------------------- */
 
 #define HOST_PADS 4
@@ -337,6 +344,7 @@ int host_run(int (*game_main)(void))
     g_w32_message_box = host_message_box;
     g_w32_async_key_state = host_async_key_state;
     g_w32_xinput_get_state = host_xinput_get_state;
+    g_w32_foreground_window = host_foreground_window;
     {
         char shots[1100];
         snprintf(shots, sizeof shots, "%s/Screenshots", host_data_dir());
