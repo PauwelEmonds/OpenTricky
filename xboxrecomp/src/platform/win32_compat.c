@@ -1139,16 +1139,23 @@ BOOL FlushFileBuffers(HANDLE h)
 /* via SDL_GetKeyboardState when main.c gets its SDL2 port.              */
 /* ===================================================================== */
 
-SHORT GetAsyncKeyState(int vKey)          { (void)vKey; return 0; }
+/* The host (SDL) answers the keyboard, pad and message-box calls. */
+SHORT (*g_w32_async_key_state)(int vKey);
+DWORD (*g_w32_xinput_get_state)(DWORD idx, XINPUT_STATE *state);
+int   (*g_w32_message_box)(const char *text, const char *caption, UINT type);
+
+SHORT GetAsyncKeyState(int vKey)
+{ return g_w32_async_key_state ? g_w32_async_key_state(vKey) : 0; }
 HWND  FindWindowA(LPCSTR c, LPCSTR w)     { (void)c; (void)w; return NULL; }
 HWND  GetActiveWindow(void)               { return NULL; }
 BOOL  SetWindowTextA(HWND h, LPCSTR t)    { (void)h; (void)t; return TRUE; }
 
 int MessageBoxA(HWND h, LPCSTR text, LPCSTR caption, UINT type)
 {
-    (void)h; (void)type;
+    (void)h;
     fprintf(stderr, "[%s] %s\n", caption ? caption : "MessageBox",
                                    text    ? text    : "");
+    if (g_w32_message_box) return g_w32_message_box(text, caption, type);
     return 1;   /* IDOK */
 }
 
@@ -1161,7 +1168,11 @@ LRESULT DispatchMessageA(const MSG *m) { (void)m; return 0; }
 
 /* XInput stub: real gamepad is wired through input_compat (SDL2). */
 DWORD XInputGetState(DWORD idx, XINPUT_STATE *state)
-{ (void)idx; if (state) memset(state, 0, sizeof(*state)); return ERROR_DEVICE_NOT_CONNECTED; }
+{
+    if (g_w32_xinput_get_state) return g_w32_xinput_get_state(idx, state);
+    if (state) memset(state, 0, sizeof(*state));
+    return ERROR_DEVICE_NOT_CONNECTED;
+}
 
 BOOL TerminateProcess(HANDLE process, UINT exitCode)
 {

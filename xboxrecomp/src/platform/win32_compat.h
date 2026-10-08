@@ -696,6 +696,12 @@ BOOL  WritePrivateProfileStringA(LPCSTR section, LPCSTR key, LPCSTR value, LPCST
 static inline MMRESULT timeBeginPeriod(UINT p) { (void)p; return TIMERR_NOERROR; }
 static inline MMRESULT timeEndPeriod(UINT p)   { (void)p; return TIMERR_NOERROR; }
 
+/* Host hooks: set by the SDL host so the Win32 input and dialog calls reach
+ * the real keyboard, pads and message boxes. NULL = the stubs' answers. */
+extern SHORT (*g_w32_async_key_state)(int vKey);
+extern DWORD (*g_w32_xinput_get_state)(DWORD idx, XINPUT_STATE *state);
+extern int   (*g_w32_message_box)(const char *text, const char *caption, UINT type);
+
 /* Window helpers the port touches outside the renderer. */
 HWND GetForegroundWindow(void);
 int  MessageBoxW(HWND hwnd, LPCWSTR text, LPCWSTR caption, UINT type);

@@ -1184,7 +1184,19 @@ void xbox_diag_stop(void)
     if (g_thread) { WaitForSingleObject(g_thread, 500); CloseHandle(g_thread); g_thread = NULL; }
 }
 
-#else  /* !_WIN32 */
+#else  /* !_WIN32: the diagnostic console and write-watches are Windows-only */
+#include <stdint.h>
+#include <wchar.h>
+void (*g_diag_shot_hook)(const wchar_t *path) = NULL;
+int (*g_diag_press_hook)(const char *name, int ms) = NULL;
+void (*g_diag_drawlog_hook)(int frames) = NULL;
+void (*g_diag_skipprog_hook)(uint32_t hash) = NULL;
+void (*g_diag_ignored_hook)(void) = NULL;
 void xbox_diag_start(void) {}
 void xbox_diag_stop(void) {}
+int  xbox_diag_watch_add(uint32_t va) { (void)va; return 0; }
+int  xbox_diag_watch_add_ex(uint32_t va, uint32_t len) { (void)va; (void)len; return 0; }
+int  xbox_diag_watch_host_write(uint32_t va, uint32_t len, int begin) { (void)va; (void)len; (void)begin; return 0; }
+void xbox_diag_watch_clear(void) {}
+int  xbox_diag_handle_fault(void *ep) { (void)ep; return 0; }
 #endif

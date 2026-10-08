@@ -19,14 +19,21 @@ if(WIN32)
     )
     target_link_libraries(xbox_d3d8 PUBLIC platform d3d11 dxgi dxguid d3dcompiler windowscodecs ole32)
 else()
+    # OpenGL ES 3.0 renderer (Linux, Android): gles/, see gles_internal.h.
     add_library(xbox_d3d8 STATIC
-        d3d8_gl.c
+        gles/gles_device.c
+        gles/gles_draw.c
+        gles/gles_resources.c
+        gles/gles_stubs.c
     )
-    find_package(SDL2 REQUIRED)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(EPOXY REQUIRED epoxy)
-    target_include_directories(xbox_d3d8 PRIVATE ${EPOXY_INCLUDE_DIRS})
-    target_link_libraries(xbox_d3d8 PUBLIC platform SDL2::SDL2 ${EPOXY_LIBRARIES})
+    if(NOT TARGET SDL2::SDL2)
+        find_package(SDL2 REQUIRED)
+    endif()
+    if(ANDROID)
+        target_link_libraries(xbox_d3d8 PUBLIC platform SDL2::SDL2 GLESv3)
+    else()
+        target_link_libraries(xbox_d3d8 PUBLIC platform SDL2::SDL2 GLESv2)
+    endif()
 endif()
 
 target_include_directories(xbox_d3d8 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

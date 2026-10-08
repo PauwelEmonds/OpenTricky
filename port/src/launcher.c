@@ -17,6 +17,7 @@
  */
 #define COBJMACROS
 #include <windows.h>
+#ifdef _WIN32
 #include <commctrl.h>
 #include <shobjidl.h>
 #include <shlobj.h>
@@ -24,6 +25,13 @@
 #include <xinput.h>
 #include <mmsystem.h>
 #include <xaudio2.h>
+#else
+/* Linux / Android: the settings part of this file is shared; the menu itself
+ * is the host's (host_sdl.c), and paths come from it. */
+#include <SDL.h>
+#include <dirent.h>
+#include "host_sdl.h"
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -75,14 +83,18 @@ static int res_list(int aspect, const Res **list)
     case LAUNCHER_ASPECT_329: *list = k_res329; return (int)(sizeof k_res329 / sizeof k_res329[0]);
     case LAUNCHER_ASPECT_AUTO: {
         static const int heights[] = { 2160, 1440, 1200, 1080, 720 };
-        DEVMODEW dm;
         int i, n = 0, mw = 1920, mh = 1080;
+#ifdef _WIN32
+        DEVMODEW dm;
         memset(&dm, 0, sizeof dm);
         dm.dmSize = sizeof dm;
         if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmPelsWidth >= 640 && dm.dmPelsHeight >= 480) {
             mw = (int)dm.dmPelsWidth;
             mh = (int)dm.dmPelsHeight;
         }
+#else
+        host_display_size(&mw, &mh);
+#endif
         {
             /* Test only: XBOX_MONITOR_SIZE=3440x1440 stands in for the monitor. */
             const char *e = getenv("XBOX_MONITOR_SIZE");
@@ -120,6 +132,19 @@ void launcher_init(uint32_t expected_entry_point)
     s_expected_entry = expected_entry_point;
 }
 
+#ifndef _WIN32
+#define PS "/"
+static void exe_dir(char *out, size_t n)
+{
+    snprintf(out, n, "%s", host_data_dir());
+}
+
+void launcher_config_path(char *out, size_t out_sz)
+{
+    snprintf(out, out_sz, "%s/SSX Tricky.ini", host_data_dir());
+}
+#else
+#define PS "\\"
 static void exe_dir(char *out, size_t n)
 {
     DWORD k = GetModuleFileNameA(NULL, out, (DWORD)n);
@@ -139,6 +164,7 @@ void launcher_config_path(char *out, size_t out_sz)
     if (dot && !strchr(dot, '\\')) *dot = '\0';
     snprintf(out, out_sz, "%s.ini", exe);
 }
+#endif
 
 /* The largest preset of the given shape whose window fits the primary
  * monitor's work area: a sensible first-run default. */
@@ -146,8 +172,9 @@ static void default_resolution(int aspect, int *w, int *h)
 {
     const Res *list;
     int n = res_list(aspect, &list);
-    RECT work, frame = { 0, 0, 0, 0 };
     int i, best = 0;
+#ifdef _WIN32
+    RECT work, frame = { 0, 0, 0, 0 };
 
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     AdjustWindowRect(&frame, WS_OVERLAPPEDWINDOW, FALSE);
@@ -156,6 +183,12 @@ static void default_resolution(int aspect, int *w, int *h)
             list[i].h + (frame.bottom - frame.top) <= work.bottom - work.top)
             best = i;
     }
+#else
+    int dw = 1280, dh = 960;
+    host_display_size(&dw, &dh);
+    for (i = 0; i < n; i++)
+        if (list[i].w <= dw && list[i].h <= dh) best = i;
+#endif
     *w = list[best].w;
     *h = list[best].h;
 }
@@ -223,7 +256,11 @@ static void fork_set(char *line, size_t n, const char *name, const char *value,
         snprintf(line + len, n - len, " %s=- (default)", name);
         return;
     }
+#ifdef _WIN32
     _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
     snprintf(line + len, n - len, " %s=%s (%s)", name, value, source);
 }
 
@@ -284,6 +321,16 @@ void launcher_log_path(char *out, size_t out_sz)
 /* A folder with something in it (the saves of an earlier version). */
 static BOOL folder_has_files(const char *dir)
 {
+#ifndef _WIN32
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    BOOL any = FALSE;
+    if (!d) return FALSE;
+    while (!any && (e = readdir(d)) != NULL)
+        if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) any = TRUE;
+    closedir(d);
+    return any;
+#else
     char pat[MAX_PATH + 4];
     WIN32_FIND_DATAA fd;
     HANDLE h;
@@ -296,6 +343,7 @@ static BOOL folder_has_files(const char *dir)
     } while (!any && FindNextFileA(h, &fd));
     FindClose(h);
     return any;
+#endif
 }
 
 /* Documents\My Games\SSX Tricky\Saves, created if missing. The
@@ -303,6 +351,10 @@ static BOOL folder_has_files(const char *dir)
  * if it cannot be had as a path the game's ANSI file calls can open. */
 static BOOL documents_saves(char *out, size_t out_sz)
 {
+#ifndef _WIN32
+    (void)out; (void)out_sz;
+    return FALSE;       /* Saves/ in the host's data folder */
+#else
     PWSTR docs = NULL;
     WCHAR w[MAX_PATH], sh[MAX_PATH];
     BOOL lossy = FALSE, ok = FALSE;
@@ -317,6 +369,7 @@ static BOOL documents_saves(char *out, size_t out_sz)
              WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, sh, -1, out, (int)out_sz, NULL, &lossy) && !lossy)
         ok = TRUE;
     return ok;
+#endif
 }
 
 /* Where the saves go. A SaveFolder set in the .ini (chosen in
@@ -333,9 +386,9 @@ int launcher_save_kind(const LauncherConfig *cfg)
     char base[MAX_PATH], p[MAX_PATH + 16], d[MAX_PATH];
     if (cfg->hdd[0]) return LAUNCHER_SAVES_CHOSEN;
     exe_dir(base, sizeof base);
-    snprintf(p, sizeof p, "%s\\hdd", base);
+    snprintf(p, sizeof p, "%s" PS "hdd", base);
     if (folder_has_files(p)) return LAUNCHER_SAVES_OLD_HDD;
-    snprintf(p, sizeof p, "%s\\portable.txt", base);
+    snprintf(p, sizeof p, "%s" PS "portable.txt", base);
     if (GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES) return LAUNCHER_SAVES_PORTABLE;
     if (documents_saves(d, sizeof d)) return LAUNCHER_SAVES_DOCUMENTS;
     return LAUNCHER_SAVES_PORTABLE;
@@ -347,12 +400,12 @@ void launcher_hdd_path(const LauncherConfig *cfg, char *out, size_t out_sz)
     const char *p = kind == LAUNCHER_SAVES_CHOSEN ? cfg->hdd : kind == LAUNCHER_SAVES_OLD_HDD ? "hdd" : "Saves";
     char joined[MAX_PATH * 2];
     if (kind == LAUNCHER_SAVES_DOCUMENTS && documents_saves(out, out_sz)) return;
-    if ((p[0] && p[1] == ':') || (p[0] == '\\' && p[1] == '\\')) {
+    if ((p[0] && p[1] == ':') || (p[0] == '\\' && p[1] == '\\') || p[0] == '/') {
         snprintf(joined, sizeof joined, "%s", p);
     } else {
         char base[MAX_PATH];
         exe_dir(base, sizeof base);
-        snprintf(joined, sizeof joined, "%s\\%s", base, p);
+        snprintf(joined, sizeof joined, "%s" PS "%s", base, p);
     }
     if (!GetFullPathNameA(joined, (DWORD)out_sz, out, NULL))
         snprintf(out, out_sz, "%s", joined);
@@ -360,6 +413,11 @@ void launcher_hdd_path(const LauncherConfig *cfg, char *out, size_t out_sz)
 
 void launcher_open_path(HWND owner, const char *path, BOOL folder)
 {
+#ifndef _WIN32
+    (void)owner;
+    if (folder) CreateDirectoryA(path, NULL);
+    host_open_path(path, folder);
+#else
     WCHAR w[MAX_PATH];
     if (folder) CreateDirectoryA(path, NULL);
     if (!MultiByteToWideChar(CP_ACP, 0, path, -1, w, MAX_PATH)) return;
@@ -368,6 +426,7 @@ void launcher_open_path(HWND owner, const char *path, BOOL folder)
         swprintf(msg, MAX_PATH + 64, L"Could not open:\n%ls", w);
         MessageBoxW(owner, msg, L"SSX Tricky", MB_ICONWARNING);
     }
+#endif
 }
 
 void launcher_config_load(LauncherConfig *cfg)
@@ -579,6 +638,18 @@ BOOL launcher_check_iso(const char *path, char *why, size_t why_sz)
     }
     return TRUE;
 }
+
+#ifndef _WIN32
+/* ── The menu, Linux / Android: the host's ───────────────────────────── */
+
+void launcher_enable_dpi_awareness(void) {}
+
+BOOL launcher_run(LauncherConfig *cfg)
+{
+    return host_launcher_run(cfg);
+}
+
+#else /* _WIN32: the launcher window, everything below */
 
 /* ── DPI ───────────────────────────────────────────────────────────── */
 
@@ -2709,3 +2780,5 @@ BOOL launcher_run(LauncherConfig *cfg)
     if (SUCCEEDED(com)) CoUninitialize();
     return start;
 }
+
+#endif /* _WIN32 */

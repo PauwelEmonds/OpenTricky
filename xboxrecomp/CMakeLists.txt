@@ -33,6 +33,11 @@ add_compile_definitions(
 #
 # Scoped to these hand-written libraries only. The generated code still has
 # implicit declarations of its own, which are the recompiler's to fix.
+# Not Windows: the OpenGL ES renderer, and nv2a_psh.c writes GLSL.
+if(NOT WIN32)
+    add_compile_definitions(OT_GLES=1)
+endif()
+
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Werror=implicit-function-declaration)
 endif()

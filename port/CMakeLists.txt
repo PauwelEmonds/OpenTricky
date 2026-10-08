@@ -98,6 +98,8 @@ set(GAME_SOURCES
 
 if(WIN32)
     list(APPEND GAME_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/ssx_recomp.rc")
+else()
+    list(APPEND GAME_SOURCES src/host_sdl.c)
 endif()
 
 if(ANDROID)

@@ -303,13 +303,81 @@ int xa2_get_buffer_size(void)
     return XA2_BUF_SAMPLES;
 }
 
-#else /* !_WIN32 -- POSIX stubs (no audio output yet) */
+#else /* !_WIN32 -- SDL audio (Linux, Android) */
 
-int  xa2_init(void)                                   { return 0; }
-void xa2_shutdown(void)                               {}
-int  xa2_is_active(void)                              { return 0; }
-int  xa2_submit_samples(const int16_t *s, int n)      { (void)s; (void)n; return 0; }
-int  xa2_get_buffer_size(void)                        { return 0; }
-int  xa2_target_queued(void)                          { return XA2_TARGET_QUEUED; }
+/* The same contract as the XAudio2 backend: 256-sample stereo buffers, a
+ * queue the APU frame thread keeps filled to the target and paces itself by.
+ * SDL's push queue stands in for the source voice. */
+#include <SDL.h>
+
+#define XA2_SAMPLE_RATE   48000
+#define XA2_CHANNELS      2
+#define XA2_BUF_SAMPLES   256
+#define XA2_NUM_BUFS      24
+#define XA2_BUF_BYTES     (XA2_BUF_SAMPLES * XA2_CHANNELS * 2)
+
+static SDL_AudioDeviceID g_dev;
+static unsigned long g_sent, g_drops;
+
+int xa2_target_queued(void)
+{
+    static int target = 0;
+    if (!target) {
+        const char *e = getenv("XBOX_AUDIO_QUEUE");
+        int n = (e && *e) ? atoi(e) : XA2_TARGET_QUEUED;
+        if (n < XA2_QUEUE_MIN) n = XA2_QUEUE_MIN;
+        if (n > XA2_QUEUE_MAX) n = XA2_QUEUE_MAX;
+        target = n;
+    }
+    return target;
+}
+
+int xa2_init(void)
+{
+    SDL_AudioSpec want, have;
+    if (!SDL_WasInit(SDL_INIT_AUDIO) && SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+        fprintf(stderr, "[AUDIO] SDL audio unavailable: %s\n", SDL_GetError());
+        return 0;
+    }
+    SDL_zero(want);
+    want.freq = XA2_SAMPLE_RATE;
+    want.format = AUDIO_S16SYS;
+    want.channels = XA2_CHANNELS;
+    want.samples = XA2_BUF_SAMPLES * 2;
+    g_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+    if (!g_dev) {
+        fprintf(stderr, "[AUDIO] no audio device: %s\n", SDL_GetError());
+        return 0;
+    }
+    SDL_PauseAudioDevice(g_dev, 0);
+    fprintf(stderr, "[AUDIO] SDL audio: %d Hz, %d channels, %d-sample device buffer, queue %d\n",
+            have.freq, have.channels, have.samples, xa2_target_queued());
+    return 1;
+}
+
+void xa2_shutdown(void)
+{
+    if (g_dev) { SDL_CloseAudioDevice(g_dev); g_dev = 0; }
+}
+
+int xa2_is_active(void) { return g_dev != 0; }
+
+int xa2_queued(void)
+{
+    if (!g_dev) return 0;
+    return (int)(SDL_GetQueuedAudioSize(g_dev) / XA2_BUF_BYTES);
+}
+
+int xa2_submit_samples(const int16_t *samples, int num_samples)
+{
+    int n = num_samples > XA2_BUF_SAMPLES ? XA2_BUF_SAMPLES : num_samples;
+    if (!g_dev) return 0;
+    if (xa2_queued() >= XA2_NUM_BUFS) { g_drops++; return 0; }
+    SDL_QueueAudio(g_dev, samples, (Uint32)(n * XA2_CHANNELS * 2));
+    g_sent++;
+    return 1;
+}
+
+int xa2_get_buffer_size(void) { return XA2_BUF_SAMPLES; }
 
 #endif /* _WIN32 */

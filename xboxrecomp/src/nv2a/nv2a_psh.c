@@ -1,5 +1,6 @@
 /*
- * NV2A register combiners -> HLSL. See nv2a_psh.h.
+ * NV2A register combiners -> HLSL (Windows) or GLSL ES 3.00 (OT_GLES, the
+ * Linux / Android renderer). See nv2a_psh.h.
  *
  * Ported from xemu's hw/xbox/nv2a/pgraph/glsl/psh.c (LGPL-2.1+, espes and the
  * xemu project): the same register decoding, input and output mappings,
@@ -14,6 +15,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef OT_GLES
+#define PSH_GLSL 1
+#else
+#define PSH_GLSL 0
+#endif
 
 typedef struct { char *buf; int size, len, overflow; } SB;
 
@@ -147,7 +154,7 @@ static void stage_code(Ps *ps, const In *in, const Out *o, int is_alpha, SB *cod
     static char mux[20500], muxm[20600];
     char abd[5000], cdd[5000], msd[5000];
     const char *wm = is_alpha ? "a" : "rgb";
-    const char *cast = is_alpha ? "" : "(float3)";
+    const char *cast = is_alpha ? "" : (PSH_GLSL ? "vec3" : "(float3)");
 
     get_input_var(ps, in[0], is_alpha, a, sizeof a);
     get_input_var(ps, in[1], is_alpha, b, sizeof b);
@@ -168,7 +175,8 @@ static void stage_code(Ps *ps, const In *in, const Out *o, int is_alpha, SB *cod
             snprintf(mux, sizeof mux, "(%s + %s)", ab, cd);
         else
             snprintf(mux, sizeof mux, "((%s) ? %s(%s) : %s(%s))",
-                     (ps->flags & 0x1) ? "r0.a >= 0.5" : "(((uint)(r0.a * 255.0)) & 1u) == 1u",
+                     (ps->flags & 0x1) ? "r0.a >= 0.5" :
+                     PSH_GLSL ? "((uint(r0.a * 255.0)) & 1u) == 1u" : "(((uint)(r0.a * 255.0)) & 1u) == 1u",
                      cast, cd, cast, ab);
         get_output(mux, o->mapping, muxm, sizeof muxm);
         sbf(code, "mux_sum.%s = clamp(%s(%s), -1.0, 1.0);\n", wm, cast, muxm);
@@ -233,6 +241,60 @@ static const char preamble[] =
     "    return uv;\n"
     "}\n";
 
+/* The same for GLSL ES 3.00: the HLSL spellings the generator writes
+ * (float4, saturate, lerp) are macros, the rest is GLSL. */
+static const char preamble_glsl[] =
+    "#version 300 es\n"
+    "precision highp float;\n"
+    "precision highp int;\n"
+    "#define float2 vec2\n"
+    "#define float3 vec3\n"
+    "#define float4 vec4\n"
+    "#define saturate(x) clamp((x), 0.0, 1.0)\n"
+    "#define lerp mix\n"
+    "layout(std140) uniform PshConsts {\n"
+    "    vec4 c0[9];\n"
+    "    vec4 c1[9];\n"
+    "    vec4 fog_color;\n"
+    "    vec4 tex_size[4];\n"
+    "    vec4 alpha_ref;\n"
+    "    vec4 clip_region[8];\n"
+    "};\n"
+    "struct PSIn { vec4 pos; vec4 d0; vec4 d1; float fog; vec4 t0; vec4 t1; vec4 t2; vec4 t3; };\n"
+    "in vec4 v_d0; in vec4 v_d1; in float v_fog;\n"
+    "in vec4 v_t0; in vec4 v_t1; in vec4 v_t2; in vec4 v_t3;\n"
+    "out vec4 o_color;\n"
+    "float sign1(float x) { x *= 255.0; return (x - 128.0) / 127.0; }\n"
+    "float sign2(float x) { x *= 255.0; return x >= 128.0 ? (x - 255.5) / 127.5 : (x + 0.5) / 127.5; }\n"
+    "float sign3(float x) { x *= 255.0; return x >= 128.0 ? (x - 256.0) / 127.0 : x / 127.0; }\n"
+    "vec3 dotmap_zero_to_one(vec4 c) { return c.rgb; }\n"
+    "vec3 dotmap_minus1_to_1_d3d(vec4 c) { return vec3(sign1(c.r), sign1(c.g), sign1(c.b)); }\n"
+    "vec3 dotmap_minus1_to_1_gl(vec4 c) { return vec3(sign2(c.r), sign2(c.g), sign2(c.b)); }\n"
+    "vec3 dotmap_minus1_to_1(vec4 c) { return vec3(sign3(c.r), sign3(c.g), sign3(c.b)); }\n"
+    "vec3 dotmap_hilo_1(vec4 c) {\n"
+    "    uint hi = (uint(c.a * 255.0) << 8) | uint(c.r * 255.0);\n"
+    "    uint lo = (uint(c.g * 255.0) << 8) | uint(c.b * 255.0);\n"
+    "    return vec3(float(hi) / 65535.0, float(lo) / 65535.0, 1.0);\n"
+    "}\n"
+    "vec3 dotmap_hilo_hemisphere_d3d(vec4 c) { return c.rgb; }\n"
+    "vec3 dotmap_hilo_hemisphere_gl(vec4 c) { return c.rgb; }\n"
+    "vec3 dotmap_hilo_hemisphere(vec4 c) { return c.rgb; }\n"
+    "vec2 remapCubeTo2D(vec3 t) {\n"
+    "    vec3 a = abs(t);\n"
+    "    vec2 uv;\n"
+    "    if (a.x > a.y && a.x > a.z) uv = (t.x > 0.0 ? vec2(-t.z, t.y) : vec2(t.z, t.y)) / a.x;\n"
+    "    else if (a.y > a.x && a.y > a.z) uv = (t.y > 0.0 ? vec2(t.x, -t.z) : vec2(t.x, t.z)) / a.y;\n"
+    "    else uv = (t.z > 0.0 ? vec2(t.x, t.y) : vec2(-t.x, t.y)) / a.z;\n"
+    "    return uv;\n"
+    "}\n";
+
+/* A texture lookup of stage i at `coord`, in the target language. */
+static void samp(int i, const char *coord, char *out, size_t n)
+{
+    if (PSH_GLSL) snprintf(out, n, "texture(tex%d, %s)", i, coord);
+    else snprintf(out, n, "tex%d.Sample(smp%d, %s)", i, i, coord);
+}
+
 /* Normalised 2D coordinate expression for stage i from `coord` (a float2
  * expression): rect (linear) textures are addressed in texels. */
 static void norm2(const Ps *ps, int i, const char *coord, char *out, size_t n)
@@ -259,11 +321,15 @@ static void tex_code(Ps *ps, int i, SB *decl, SB *v)
     const Nv2aPshState *st = ps->st;
     int mode = ps->tex_modes[i], in = ps->input_tex[i] & 3;
     const char *dm = dotmap_funcs[ps->dot_map[i] & 7];
-    char co[256], nrm[320];
+    char co[256], nrm[320], sm[512], arg[400];
 
-    if (stage_samples(mode))
-        sbf(decl, "Texture2D tex%d : register(t%d);\nSamplerState smp%d : register(s%d);\n",
-            i, i, i, i);
+    if (stage_samples(mode)) {
+        if (PSH_GLSL)
+            sbf(decl, "uniform sampler2D tex%d;\n", i);
+        else
+            sbf(decl, "Texture2D tex%d : register(t%d);\nSamplerState smp%d : register(s%d);\n",
+                i, i, i, i);
+    }
     switch (mode) {
     case MODE_NONE:
         sbf(v, "float4 t%d = float4(0.0, 0.0, 0.0, 1.0);\n", i);
@@ -273,15 +339,20 @@ static void tex_code(Ps *ps, int i, SB *decl, SB *v)
         if (st->tex_cube[i]) {
             snprintf(co, sizeof co, "remapCubeTo2D(float3(1.0, pT%d.y / pT%d.w, -pT%d.x / pT%d.w))",
                      i, i, i, i);
-            sbf(v, "float4 t%d = tex%d.Sample(smp%d, %s);\n", i, i, i, co);
+            samp(i, co, sm, sizeof sm);
+            sbf(v, "float4 t%d = %s;\n", i, sm);
         } else {
             snprintf(co, sizeof co, "pT%d.xy", i);
             norm2(ps, i, co, nrm, sizeof nrm);
-            sbf(v, "float4 t%d = tex%d.Sample(smp%d, %s / pT%d.w);\n", i, i, i, nrm, i);
+            snprintf(arg, sizeof arg, "%s / pT%d.w", nrm, i);
+            samp(i, arg, sm, sizeof sm);
+            sbf(v, "float4 t%d = %s;\n", i, sm);
         }
         break;
     case MODE_CUBEMAP:
-        sbf(v, "float4 t%d = tex%d.Sample(smp%d, remapCubeTo2D(pT%d.xyz));\n", i, i, i, i);
+        snprintf(arg, sizeof arg, "remapCubeTo2D(pT%d.xyz)", i);
+        samp(i, arg, sm, sizeof sm);
+        sbf(v, "float4 t%d = %s;\n", i, sm);
         break;
     case MODE_PASSTHRU:
         sbf(v, "float4 t%d = pT%d;\n", i, i);
@@ -295,13 +366,15 @@ static void tex_code(Ps *ps, int i, SB *decl, SB *v)
     case MODE_BUMPENVMAP_LUM:            /* bump matrix not tracked yet: unperturbed */
         snprintf(co, sizeof co, "pT%d.xy", i);
         norm2(ps, i, co, nrm, sizeof nrm);
-        sbf(v, "float4 t%d = tex%d.Sample(smp%d, %s);\n", i, i, i, nrm);
+        samp(i, nrm, sm, sizeof sm);
+        sbf(v, "float4 t%d = %s;\n", i, sm);
         break;
     case MODE_DOT_ST:
         sbf(v, "float dot%d = dot(pT%d.xyz, %s(t%d));\n", i, i, dm, in);
         snprintf(co, sizeof co, "float2(dot%d, dot%d)", i - 1, i);
         norm2(ps, i, co, nrm, sizeof nrm);
-        sbf(v, "float4 t%d = tex%d.Sample(smp%d, %s);\n", i, i, i, nrm);
+        samp(i, nrm, sm, sizeof sm);
+        sbf(v, "float4 t%d = %s;\n", i, sm);
         break;
     case MODE_DOT_ZW:
     case MODE_DOTPRODUCT:
@@ -312,8 +385,9 @@ static void tex_code(Ps *ps, int i, SB *decl, SB *v)
         sbf(v, "float dot%d = dot(pT%d.xyz, %s(t%d));\n", i, i, dm, in);
         sbf(v, "float dot%d_n = dot(pT%d.xyz, %s(t%d));\n", i, i + 1,
             dotmap_funcs[ps->dot_map[(i + 1) & 3] & 7], ps->input_tex[(i + 1) & 3] & 3);
-        sbf(v, "float4 t%d = tex%d.Sample(smp%d, remapCubeTo2D(float3(dot%d, dot%d, dot%d_n)));\n",
-            i, i, i, i - 1, i, i);
+        snprintf(arg, sizeof arg, "remapCubeTo2D(float3(dot%d, dot%d, dot%d_n))", i - 1, i, i);
+        samp(i, arg, sm, sizeof sm);
+        sbf(v, "float4 t%d = %s;\n", i, sm);
         break;
     case MODE_DOT_RFLCT_SPEC:
         sbf(v, "float dot%d = dot(pT%d.xyz, %s(t%d));\n", i, i, dm, in);
@@ -321,19 +395,26 @@ static void tex_code(Ps *ps, int i, SB *decl, SB *v)
         sbf(v, "float3 e_%d = float3(pT%d.w, pT%d.w, pT%d.w);\n", i, i - 2, i - 1, i);
         sbf(v, "float3 rv_%d = 2.0 * n_%d * dot(n_%d, e_%d) / dot(n_%d, n_%d) - e_%d;\n",
             i, i, i, i, i, i, i);
-        sbf(v, "float4 t%d = tex%d.Sample(smp%d, remapCubeTo2D(rv_%d));\n", i, i, i, i);
+        snprintf(arg, sizeof arg, "remapCubeTo2D(rv_%d)", i);
+        samp(i, arg, sm, sizeof sm);
+        sbf(v, "float4 t%d = %s;\n", i, sm);
         break;
     case MODE_DOT_STR_3D:
     case MODE_DOT_STR_CUBE:
         sbf(v, "float dot%d = dot(pT%d.xyz, %s(t%d));\n", i, i, dm, in);
-        sbf(v, "float4 t%d = tex%d.Sample(smp%d, remapCubeTo2D(float3(dot%d, dot%d, dot%d)));\n",
-            i, i, i, i - 2, i - 1, i);
+        snprintf(arg, sizeof arg, "remapCubeTo2D(float3(dot%d, dot%d, dot%d))", i - 2, i - 1, i);
+        samp(i, arg, sm, sizeof sm);
+        sbf(v, "float4 t%d = %s;\n", i, sm);
         break;
     case MODE_DPNDNT_AR:
-        sbf(v, "float4 t%d = tex%d.Sample(smp%d, t%d.ar);\n", i, i, i, in);
+        snprintf(arg, sizeof arg, "t%d.ar", in);
+        samp(i, arg, sm, sizeof sm);
+        sbf(v, "float4 t%d = %s;\n", i, sm);
         break;
     case MODE_DPNDNT_GB:
-        sbf(v, "float4 t%d = tex%d.Sample(smp%d, t%d.gb);\n", i, i, i, in);
+        snprintf(arg, sizeof arg, "t%d.gb", in);
+        samp(i, arg, sm, sizeof sm);
+        sbf(v, "float4 t%d = %s;\n", i, sm);
         break;
     default:                             /* BRDF, DOT_RFLCT_SPEC_CONST: unimplemented in xemu too */
         sbf(v, "float4 t%d = float4(0.0, 0.0, 0.0, 0.0);\n", i);
@@ -446,8 +527,11 @@ int nv2a_psh_generate(const Nv2aPshState *st, char *buf, int size)
             get_input_var(&ps, ps.fin[3], 0, d, sizeof d);
             get_input_var(&ps, ps.fin[6], 1, g, sizeof g);
             sbf(&code, "// final combiner\nfloat4 fragColor;\n");
-            sbf(&code, "fragColor.rgb = %s + lerp((float3)(%s), (float3)(%s), (float3)(%s));\n",
-                d, c, b, a);
+            if (PSH_GLSL)
+                sbf(&code, "fragColor.rgb = %s + mix(vec3(%s), vec3(%s), vec3(%s));\n", d, c, b, a);
+            else
+                sbf(&code, "fragColor.rgb = %s + lerp((float3)(%s), (float3)(%s), (float3)(%s));\n",
+                    d, c, b, a);
             sbf(&code, "fragColor.a = %s;\n", g);
         } else {
             sbf(&code, "float4 fragColor = r0;\n");
@@ -467,10 +551,28 @@ int nv2a_psh_generate(const Nv2aPshState *st, char *buf, int size)
         if (st->alpha_func == 0)
             sbf(&code, "discard;\n");
         else
-            sbf(&code, "if (!((int)round(saturate(fragColor.a) * 255.0) %s (int)alpha_ref.x)) discard;\n",
+            sbf(&code, PSH_GLSL ?
+                "if (!(int(round(saturate(fragColor.a) * 255.0)) %s int(alpha_ref.x))) discard;\n" :
+                "if (!((int)round(saturate(fragColor.a) * 255.0) %s (int)alpha_ref.x)) discard;\n",
                 ops[st->alpha_func & 7]);
     }
 
+    if (PSH_GLSL) {
+        sbf(&out, "%s%s", preamble_glsl, declbuf);
+        sbf(&out, "void main() {\n"
+                  "PSIn i;\n"
+                  "i.pos = gl_FragCoord; i.d0 = v_d0; i.d1 = v_d1; i.fog = v_fog;\n"
+                  "i.t0 = v_t0; i.t1 = v_t1; i.t2 = v_t2; i.t3 = v_t3;\n");
+        if (st->window_clip)
+            sbf(&out, "{ vec2 wc = i.pos.xy - 0.5; bool hit = false;\n"
+                      "  for (int k = 0; k < 8; k++)\n"
+                      "    if (all(greaterThanEqual(wc, clip_region[k].xy)) && all(lessThan(wc, clip_region[k].zw))) hit = true;\n"
+                      "  if (%shit) discard; }\n", st->window_clip == 2 ? "" : "!");
+        sbf(&out, "%s%so_color = fragColor;\n}\n", varsbuf, codebuf);
+        if (out.overflow || decl.overflow || vars.overflow || code.overflow)
+            return -1;
+        return out.len;
+    }
     sbf(&out, "%s%s", preamble, declbuf);
     sbf(&out, "float4 main(PSIn i) : SV_TARGET {\n");
     if (st->window_clip) {

@@ -142,6 +142,14 @@ extern ptrdiff_t g_xbox_mem_offset;
  * from the extracted files in YOUR_GAME_DIR exactly as before. */
 #define YOUR_GAME_ISO            "SSXTricky_USA.iso"
 
+/* The executable's load address, for offsets addr2line understands. */
+#ifdef _WIN32
+extern void *__ImageBase;
+#define OT_IMAGE_BASE (&__ImageBase)
+#else
+#define OT_IMAGE_BASE ((void *)GetModuleHandle(NULL))
+#endif
+
 /* ── Forward declarations ──────────────────────────────────── */
 
 static BOOL load_xbe(const char *path, void **out_data, size_t *out_size);
@@ -607,7 +615,6 @@ void xbox_lowaccess_log(unsigned va, void *ra)
     for (i = 0; i < g_lowacc_n; i++)
         if (g_lowacc[i] == ra && g_lowacc_va[i] == va) { g_lowacc_hits[i]++; return; }
     if (g_lowacc_n < LOWACC_MAX) {
-        extern void *__ImageBase;
         g_lowacc[g_lowacc_n] = ra;
         g_lowacc_va[g_lowacc_n] = va;
         g_lowacc_hits[g_lowacc_n] = 1;
@@ -616,7 +623,7 @@ void xbox_lowaccess_log(unsigned va, void *ra)
          * so an atexit report never runs. */
         fprintf(stderr, "[LOWACC] new reader #%d va=0x%02X rva=0x%08llX\n",
                 g_lowacc_n, va,
-                (unsigned long long)((char *)ra - (char *)&__ImageBase));
+                (unsigned long long)((char *)ra - (char *)OT_IMAGE_BASE));
         fflush(stderr);
     }
 }
@@ -624,12 +631,11 @@ void xbox_lowaccess_log(unsigned va, void *ra)
 static void xbox_lowaccess_report(void)
 {
     int i;
-    extern void *__ImageBase;
     if (!g_lowacc_n) { fprintf(stderr, "[LOWACC] no reads of VA 8/0xC\n"); return; }
     fprintf(stderr, "[LOWACC] %d distinct reader(s) of VA 8/0xC:\n", g_lowacc_n);
     for (i = 0; i < g_lowacc_n; i++)
         fprintf(stderr, "[LOWACC]   va=0x%02X rva=0x%08llX  x%u\n", g_lowacc_va[i],
-                (unsigned long long)((char *)g_lowacc[i] - (char *)&__ImageBase),
+                (unsigned long long)((char *)g_lowacc[i] - (char *)OT_IMAGE_BASE),
                 g_lowacc_hits[i]);
     fflush(stderr);
 }
@@ -1374,10 +1380,18 @@ int main(int argc, char **argv)
     return WinMain(GetModuleHandle(NULL), NULL, GetCommandLineA(), SW_SHOW);
 }
 #else
+/* Linux / Android: SDL owns the main thread (the window and its events);
+ * the game runs on a thread of its own (host_sdl.c). */
+#include "host_sdl.h"
+static int game_main(void)
+{
+    return WinMain(GetModuleHandle(NULL), NULL, NULL, SW_SHOW);
+}
+
 int main(int argc, char **argv)
 {
     s_argc = argc;
     s_argv = argv;
-    return WinMain(GetModuleHandle(NULL), NULL, NULL, SW_SHOW);
+    return host_run(game_main);
 }
 #endif
