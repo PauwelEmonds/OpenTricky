@@ -9,6 +9,7 @@
  * every GL call afterwards happens on that thread.
  */
 #include "gles_internal.h"
+#include "../../kernel/xbox_perf.h"
 #include <SDL.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -449,7 +450,23 @@ static void fps_title(void)
 static void (*s_overlay)(int w, int h);
 void d3d8_SetPresentOverlay(void (*fn)(int w, int h)) { s_overlay = fn; }
 
+static void host_present_impl(void);
+
+/* XBOX_PERF=1: the port's frame profile by zones (kernel/xbox_perf.c). */
+void gles_frame_end(void);
+
 static void host_present(void)
+{
+    double t0;
+    gles_frame_end();
+    if (!g_perf_on) { host_present_impl(); return; }
+    t0 = perf_now();
+    host_present_impl();
+    perf_add(PZ_PRESENT, perf_now() - t0);
+    perf_present_done(-1.0);
+}
+
+static void host_present_impl(void)
 {
     int dw = 0, dh = 0;
     char shot[1024];
@@ -495,7 +512,11 @@ static void host_present(void)
         if (s_overlay) { s_overlay(dw, dh); gles_invalidate_state(); }
     }
     wait_while_paused();
-    SDL_GL_SwapWindow(s_window);
+    {
+        double ts = g_perf_on ? perf_now() : 0.0;
+        SDL_GL_SwapWindow(s_window);
+        if (g_perf_on) perf_add(PZ_DXGI, perf_now() - ts);
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, gles_draw_target());
     gles_invalidate_state();
     InterlockedIncrement(&s_frames);

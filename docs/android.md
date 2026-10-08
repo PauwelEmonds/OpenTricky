@@ -17,8 +17,14 @@ serves both: the Android app is the Linux build packaged as `libmain.so`.
 | Launcher | the launcher window | settings in `SSX Tricky.ini`; Android asks for the disc image |
 
 Not ported yet (all off by default on Windows too): the post chain and SMAA,
-soft shadows, the GPU profiler. Vertex programs run on the CPU
-(as `XBOX_VSH_GPU=0` on Windows); point sprites are expanded on the CPU.
+soft shadows, the GPU profiler. Vertex programs run on the GPU as on Windows,
+as GLSL (`gles/gles_vsh.c`, the HLSL generator's rules); point sprites are
+expanded on the CPU (ES 3.0 has no geometry shader).
+
+Switches for testing: `OT_GL_VSH=0` runs vertex programs on the CPU;
+`OT_GL_UPLOAD=map|sub` picks how vertices go up (mapped by default,
+`glBufferSubData` on emulators); `OT_UPLOAD_STATS=1` logs the bytes uploaded
+per frame; `OT_SHOT_DIR=dir OT_SHOT_EVERY=n` saves every n-th frame.
 
 ## Building for Linux
 

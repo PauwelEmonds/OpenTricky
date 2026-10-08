@@ -235,6 +235,9 @@ static BOOL has_flag(const WCHAR *flag)
  */
 static BOOL output_is_redirected(void)
 {
+#ifdef __ANDROID__
+    return FALSE;       /* stdout is always the log file there (host_sdl.c) */
+#endif
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD mode;
     if (!h || h == INVALID_HANDLE_VALUE) return FALSE;

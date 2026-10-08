@@ -25,6 +25,7 @@ else()
         gles/gles_draw.c
         gles/gles_resources.c
         gles/gles_stubs.c
+        gles/gles_vsh.c
     )
     if(NOT TARGET SDL2::SDL2)
         find_package(SDL2 REQUIRED)

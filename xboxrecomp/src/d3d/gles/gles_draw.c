@@ -16,7 +16,10 @@
  * the GL counterpart of the D3D11 renderer's NO_OVERWRITE / DISCARD rings.
  */
 #include "gles_internal.h"
+#include "../../kernel/xbox_perf.h"
 #include "../../nv2a/nv2a_psh.h"
+#include "gles_vsh.h"
+#include <dxgiformat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,7 +54,21 @@ typedef struct {
     GLenum   target;
     GLuint   buf;
     GLsizeiptr size, off;
+    unsigned gen;                 /* +1 at each orphaning: older offsets are gone */
+    unsigned bound;               /* s_epoch when last bound to its target */
 } Stream;
+
+static unsigned s_epoch = 1;      /* +1 at each gles_invalidate_state */
+
+static void stream_bind(Stream *s)
+{
+    if (s->bound != s_epoch) { glBindBuffer(s->target, s->buf); s->bound = s_epoch; }
+}
+
+/* 1: glBufferSubData; 0: unsynchronized glMapBufferRange. Mapping is the cheap
+ * path on phone drivers; an emulator's GL pipe makes each map a round trip.
+ * OT_GL_UPLOAD=map|sub overrides the choice of gles_draw_init. */
+static int s_upload_sub;
 
 static Stream s_vtx = { GL_ARRAY_BUFFER, 0, 32 * 1024 * 1024, 0 };
 static Stream s_idx = { GL_ELEMENT_ARRAY_BUFFER, 0, 8 * 1024 * 1024, 0 };
@@ -66,16 +83,22 @@ static GLintptr stream_put(Stream *s, const void *data, GLsizeiptr n, GLsizeiptr
     GLbitfield fl = GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT | GL_MAP_INVALIDATE_RANGE_BIT;
     if (!s->buf) {
         glGenBuffers(1, &s->buf);
-        glBindBuffer(s->target, s->buf);
+        stream_bind(s);
         glBufferData(s->target, s->size, NULL, GL_STREAM_DRAW);
     } else {
-        glBindBuffer(s->target, s->buf);
+        stream_bind(s);
     }
     if (n > s->size) return -1;
     off = (s->off + align - 1) / align * align;
     if (off + n > s->size) {
         glBufferData(s->target, s->size, NULL, GL_STREAM_DRAW);   /* orphan */
         off = 0;
+        s->gen++;
+    }
+    if (s_upload_sub) {
+        glBufferSubData(s->target, off, n, data);
+        s->off = off + n;
+        return off;
     }
     p = glMapBufferRange(s->target, off, n, fl);
     if (!p) return -1;
@@ -89,7 +112,12 @@ static GLintptr stream_put(Stream *s, const void *data, GLsizeiptr n, GLsizeiptr
  * between them (the wrap orphans the buffer the earlier ones live in). */
 static void stream_reserve(Stream *s, GLsizeiptr total)
 {
-    if (s->buf && s->off + total > s->size) s->off = s->size;
+    if (s->buf && s->off + total > s->size) {
+        stream_bind(s);
+        glBufferData(s->target, s->size, NULL, GL_STREAM_DRAW);
+        s->off = 0;
+        s->gen++;
+    }
 }
 
 /* ======================================================================== */
@@ -189,7 +217,27 @@ static const char s_nv_vs[] =
     "}\n";
 
 #define NV_PS_CACHE 4096
-static struct { uint64_t key; GLuint prog; GLint u_screen; } g_ps[NV_PS_CACHE];
+static struct { uint64_t key; GLuint prog, fs; GLint u_screen; float screen[4]; } g_ps[NV_PS_CACHE];
+static GLuint s_nv_vs_sh;           /* s_nv_vs, compiled once */
+
+static GLuint link2(GLuint vs, GLuint fs, const char *tag)
+{
+    GLuint p = glCreateProgram();
+    GLint ok = 0;
+    glAttachShader(p, vs);
+    glAttachShader(p, fs);
+    glLinkProgram(p);
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        static int told;
+        char log[4096];
+        glGetProgramInfoLog(p, sizeof log, NULL, log);
+        if (told++ < 6) fprintf(stderr, "[GLES] %s program link failed:\n%s\n", tag, log);
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
 static int g_nps;
 volatile long g_nv_compiles = 0;
 volatile double g_nv_compile_ms = 0;
@@ -231,7 +279,9 @@ int d3d8_nv2a_add_ps(unsigned long long key, const char *glsl, int len)
     i = -1 - i;
     gles_check_thread("add_ps");
     t0 = now_ms();
-    p = gles_compile_program(s_nv_vs, glsl, "nv2a");
+    if (!s_nv_vs_sh) s_nv_vs_sh = compile(GL_VERTEX_SHADER, s_nv_vs, "nv2a");
+    g_ps[i].fs = compile(GL_FRAGMENT_SHADER, glsl, "nv2a");
+    p = (s_nv_vs_sh && g_ps[i].fs) ? link2(s_nv_vs_sh, g_ps[i].fs, "nv2a") : 0;
     g_nv_compiles++;
     g_nv_compile_ms += now_ms() - t0;
     g_ps[i].key = key;
@@ -393,11 +443,68 @@ static struct {
     int vx, vy, vw, vh;
     float zmin, zmax;
     GLuint tex[4], smp[4];
+    /* vertex attribute arrays: the enabled set (amask_ok) and the layout the
+     * pointers describe (0: unknown) */
+    unsigned amask; int amask_ok;
+    uint64_t layout;
 } S;
+
+/* Attributes whose current value (the one a disabled array reads) a
+ * vertex-program draw set: put back to (0, 0, 0, 1) for the other shaders. */
+static unsigned s_cur_dirty;
+
+static void attribs_mask(unsigned mask)
+{
+    unsigned ch = S.amask_ok ? (S.amask ^ mask) : 0xFFFFu;
+    int a;
+    for (a = 0; ch; a++, ch >>= 1)
+        if (ch & 1) {
+            if (mask & (1u << a)) glEnableVertexAttribArray((GLuint)a);
+            else glDisableVertexAttribArray((GLuint)a);
+        }
+    S.amask = mask;
+    S.amask_ok = 1;
+}
+
+static void attribs_clean_current(void)
+{
+    int a;
+    for (a = 0; s_cur_dirty; a++, s_cur_dirty >>= 1)
+        if (s_cur_dirty & 1) glVertexAttrib4f((GLuint)a, 0.0f, 0.0f, 0.0f, 1.0f);
+}
 
 void gles_invalidate_state(void)
 {
     memset(&S, 0, sizeof S);
+    s_epoch++;
+}
+
+/* Uniform blocks: 0 combiner constants, 1 vertex-program constants, 2 their
+ * parameters. Draws in a row mostly repeat them: then the range bound last
+ * is kept. Callers reserve s_ubo for the whole draw first, so no upload of
+ * the draw orphans the buffer an earlier binding of it points into. */
+static struct { uint8_t last[VSHCPU_CONSTANTS * 16]; unsigned size, gen, epoch; } s_us[3];
+
+static int ubo_bind(GLuint binding, const void *data, unsigned size)
+{
+    GLintptr off;
+    static int nodedup = -1;
+    if (nodedup < 0) nodedup = getenv("OT_UBO_NODEDUP") != NULL;
+    if (!nodedup && s_us[binding].epoch == s_epoch && s_us[binding].gen == s_ubo.gen &&
+        s_us[binding].size == size && !memcmp(s_us[binding].last, data, size))
+        return 1;
+    off = stream_put(&s_ubo, data, (GLsizeiptr)size, s_ubo_align);
+    if (off < 0) return 0;
+    glBindBufferRange(GL_UNIFORM_BUFFER, binding, s_ubo.buf, off, (GLsizeiptr)size);
+    if (size <= sizeof s_us[binding].last) {
+        memcpy(s_us[binding].last, data, size);
+        s_us[binding].size = size;
+        s_us[binding].gen = s_ubo.gen;
+        s_us[binding].epoch = s_epoch;
+    } else {
+        s_us[binding].epoch = 0;
+    }
+    return 1;
 }
 
 static void use_program(GLuint p)
@@ -652,6 +759,13 @@ int gles_draw_init(void)
                    strstr(ext, "GL_OES_texture_border_clamp") != NULL;
     s_has_mirror_once = strstr(ext, "GL_EXT_texture_mirror_clamp_to_edge") != NULL;
     if (s_has_aniso) glGetFloatv(0x84FF /* MAX_TEXTURE_MAX_ANISOTROPY */, &s_max_aniso);
+    {
+        const char *r = (const char *)glGetString(GL_RENDERER), *e = getenv("OT_GL_UPLOAD");
+        if (!r) r = "";
+        s_upload_sub = strstr(r, "Emulator") || strstr(r, "SwiftShader") || strstr(r, "ANGLE");
+        if (e && !strcmp(e, "sub")) s_upload_sub = 1;
+        if (e && !strcmp(e, "map")) s_upload_sub = 0;
+    }
     glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &s_ubo_align);
     if (s_ubo_align < 16) s_ubo_align = 16;
     fprintf(stderr, "[GLES] %s / %s / %s\n", (const char *)glGetString(GL_VENDOR),
@@ -659,6 +773,7 @@ int gles_draw_init(void)
     fprintf(stderr, "[GLES] depth clamp %s, anisotropy %s (%.0fx), border clamp %s\n",
             s_has_depth_clamp ? "yes" : "emulated", s_has_aniso ? "yes" : "no", s_max_aniso,
             s_has_border ? "yes" : "no");
+    fprintf(stderr, "[GLES] buffer uploads: %s\n", s_upload_sub ? "glBufferSubData" : "mapped");
 
     glGenVertexArrays(1, &s_vao);
     glBindVertexArray(s_vao);
@@ -720,12 +835,6 @@ static UINT prim_verts(D3DPRIMITIVETYPE p, UINT n)
     }
 }
 
-static void disable_attribs(int from)
-{
-    int i;
-    for (i = from; i < 8; i++) glDisableVertexAttribArray((GLuint)i);
-}
-
 HRESULT d3d8_nv2a_draw(D3DPRIMITIVETYPE prim, UINT prim_count, const void *verts, UINT stride,
                        unsigned long long ps_key, const void *ps_consts, UINT ps_consts_size,
                        int raster)
@@ -740,6 +849,8 @@ HRESULT d3d8_nv2a_draw(D3DPRIMITIVETYPE prim, UINT prim_count, const void *verts
         prim != D3DPT_POINTLIST)
         return E_INVALIDARG;
     gles_check_thread("nv2a_draw");
+    double pt = g_perf_on ? perf_now() : 0.0;
+#define PERF_STEP(z) do { if (g_perf_on) { double t_ = perf_now(); perf_add((z), t_ - pt); pt = t_; } } while (0)
 
     gles_apply_states(raster);
     use_program(prog);
@@ -749,38 +860,428 @@ HRESULT d3d8_nv2a_draw(D3DPRIMITIVETYPE prim, UINT prim_count, const void *verts
     if (screen[1] <= 0.0f) screen[1] = 480.0f;
     screen[2] = (!(raster & 1) && !s_has_depth_clamp) ? 1.0f : 0.0f;
     screen[3] = 0.0f;
-    glUniform4fv(g_ps[i].u_screen, 1, screen);
+    if (memcmp(g_ps[i].screen, screen, sizeof screen)) {
+        glUniform4fv(g_ps[i].u_screen, 1, screen);
+        memcpy(g_ps[i].screen, screen, sizeof screen);
+    }
+    PERF_STEP(PZ_DSTATE);
 
-    uoff = stream_put(&s_ubo, ps_consts, (GLsizeiptr)ps_consts_size, s_ubo_align);
-    if (uoff < 0) return E_OUTOFMEMORY;
-    glBindBufferRange(GL_UNIFORM_BUFFER, 0, s_ubo.buf, uoff, (GLsizeiptr)ps_consts_size);
+    stream_reserve(&s_ubo, (GLsizeiptr)ps_consts_size + s_ubo_align);
+    if (!ubo_bind(0, ps_consts, ps_consts_size)) return E_OUTOFMEMORY;
+    PERF_STEP(PZ_DCB);
 
-    voff = stream_put(&s_vtx, verts, (GLsizeiptr)nv * stride, 16);
+    /* The vertices at a multiple of the stride, so the attributes point at the
+     * buffer's start once and the draw's first vertex says where they are. */
+    voff = stream_put(&s_vtx, verts, (GLsizeiptr)nv * stride, (GLsizeiptr)stride);
     if (voff < 0) return E_OUTOFMEMORY;
     glBindVertexArray(s_vao);
-    {
+    attribs_clean_current();
+    attribs_mask(0xFFu);
+    if (S.layout != (1ull << 63 | stride)) {
         /* ProgVertex: pos 0, d0 16, d1 32, fog 48, t0..t3 52.. */
         static const int off[8] = { 0, 16, 32, 48, 52, 68, 84, 100 };
         static const int cnt[8] = { 4, 4, 4, 1, 4, 4, 4, 4 };
         int a;
-        for (a = 0; a < 8; a++) {
-            glEnableVertexAttribArray((GLuint)a);
+        for (a = 0; a < 8; a++)
             glVertexAttribPointer((GLuint)a, cnt[a], GL_FLOAT, GL_FALSE, (GLsizei)stride,
-                                  (const void *)(voff + off[a]));
-        }
+                                  (const void *)(GLintptr)off[a]);
+        S.layout = 1ull << 63 | stride;
     }
-    glDrawArrays(gl_prim(prim), 0, (GLsizei)nv);
+    PERF_STEP(PZ_DUP);
+    glDrawArrays(gl_prim(prim), (GLint)(voff / (GLintptr)stride), (GLsizei)nv);
+    PERF_STEP(PZ_DDRAW);
     return S_OK;
 }
 
-/* Vertex programs on the GPU need a GLSL vertex-program generator and, for
- * points, geometry the ES 3.0 pipeline cannot make: not in this build yet --
- * the translator then runs the programs on the CPU and draws through
- * d3d8_nv2a_draw, as XBOX_VSH_GPU=0 does on Windows. */
-#include "../d3d8_nv2a_vsh.h"
-int d3d8_nv2a_vsh_ready(const Nv2aVshDraw *d) { (void)d; return 0; }
-int d3d8_nv2a_draw_program_gpu(const Nv2aVshDraw *d) { (void)d; return 0; }
+/* ---- vertex programs on the GPU (gles_vsh.c) -------------------------------
+ * As d3d8_nv2a.c's path: the title's vertex arrays go up as they are, with
+ * the indices, and a generated vertex shader runs the program. Points stay
+ * on the CPU (squares need a geometry shader, which ES 3.0 lacks).
+ * OT_GL_VSH=0 runs every program on the CPU. */
+
+#define VSH_CACHE 1024
+static struct { uint64_t key; GLuint sh; int done; } g_vsh[VSH_CACHE];
+static int g_nvsh;
+#define PAIR_CACHE 4096
+static struct { uint64_t key; GLuint prog; } g_pair[PAIR_CACHE];
+static int g_npair;
+
+static int vsh_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("OT_GL_VSH"); on = !(e && e[0] == '0'); }
+    return on;
+}
+
+static uint64_t fnv64(uint64_t h, const void *p, size_t n)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    while (n--) { h ^= *b++; h *= 1099511628211ull; }
+    return h;
+}
+
+/* How an element of this DXGI format reaches GL; 0 if it cannot. */
+static int gl_attr_fmt(uint32_t dx, GLint *n, GLenum *type, GLboolean *norm, int *integer)
+{
+    *norm = GL_FALSE; *integer = 0;
+    switch (dx) {
+    case DXGI_FORMAT_R32_FLOAT:          *n = 1; *type = GL_FLOAT; return 1;
+    case DXGI_FORMAT_R32G32_FLOAT:       *n = 2; *type = GL_FLOAT; return 1;
+    case DXGI_FORMAT_R32G32B32_FLOAT:    *n = 3; *type = GL_FLOAT; return 1;
+    case DXGI_FORMAT_R32G32B32A32_FLOAT: *n = 4; *type = GL_FLOAT; return 1;
+    case DXGI_FORMAT_R8_UNORM:           *n = 1; *type = GL_UNSIGNED_BYTE; *norm = GL_TRUE; return 1;
+    case DXGI_FORMAT_R8G8_UNORM:         *n = 2; *type = GL_UNSIGNED_BYTE; *norm = GL_TRUE; return 1;
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:     *n = 4; *type = GL_UNSIGNED_BYTE; *norm = GL_TRUE; return 1;
+    case DXGI_FORMAT_R16_SNORM:          *n = 1; *type = GL_SHORT; *norm = GL_TRUE; return 1;
+    case DXGI_FORMAT_R16G16_SNORM:       *n = 2; *type = GL_SHORT; *norm = GL_TRUE; return 1;
+    case DXGI_FORMAT_R16G16B16A16_SNORM: *n = 4; *type = GL_SHORT; *norm = GL_TRUE; return 1;
+    case DXGI_FORMAT_R16_SINT:           *n = 1; *type = GL_SHORT; *integer = 1; return 1;
+    case DXGI_FORMAT_R16G16_SINT:        *n = 2; *type = GL_SHORT; *integer = 1; return 1;
+    case DXGI_FORMAT_R16G16B16A16_SINT:  *n = 4; *type = GL_SHORT; *integer = 1; return 1;
+    case DXGI_FORMAT_R32_UINT:           *n = 1; *type = GL_UNSIGNED_INT; *integer = 1; return 1;
+    default: return 0;
+    }
+}
+
+/* An array of stride 0 (one element for all vertices) as the attribute's
+ * current value, its array disabled. */
+static void attr_const_set(GLuint a, uint32_t dx, const uint8_t *p)
+{
+    float f[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    GLint n; GLenum t; GLboolean nm; int in, k;
+    if (!gl_attr_fmt(dx, &n, &t, &nm, &in)) return;
+    for (k = 0; k < n; k++) {
+        switch (t) {
+        case GL_FLOAT: memcpy(&f[k], p + 4 * k, 4); break;
+        case GL_UNSIGNED_BYTE: f[k] = p[k] / 255.0f; break;
+        case GL_SHORT: {
+            int16_t v; memcpy(&v, p + 2 * k, 2);
+            if (in) f[k] = (float)v;
+            else { f[k] = v / 32767.0f; if (f[k] < -1.0f) f[k] = -1.0f; }
+            break;
+        }
+        case GL_UNSIGNED_INT: { uint32_t v; memcpy(&v, p, 4); glVertexAttribI4ui(a, v, 0, 0, 1); return; }
+        }
+    }
+    if (in) glVertexAttribI4i(a, (GLint)f[0], (GLint)f[1], (GLint)f[2], (GLint)f[3]);
+    else glVertexAttrib4fv(a, f);
+}
+
+static void vsh_kinds(const Nv2aVshDraw *d, uint8_t kind[16])
+{
+    int a;
+    for (a = 0; a < 16; a++) {
+        if (!(d->inputs & (1u << a))) { kind[a] = 0xFF; continue; }
+        kind[a] = d->attr[a].kind;
+        if ((kind[a] & 0x0F) != NV2A_VSH_IN_CONST && d->attr[a].dxgi_format == DXGI_FORMAT_B8G8R8A8_UNORM)
+            kind[a] |= GLES_VSH_IN_BGRA;
+    }
+}
+
+/* The vertex shader of this program and these inputs, compiled on first use
+ * (a failure is remembered). */
+static GLuint vsh_get(const Nv2aVshDraw *d, uint64_t *keyp)
+{
+    static char src[262144];
+    uint8_t kind[16];
+    uint64_t key;
+    unsigned h, n;
+    int len;
+    vsh_kinds(d, kind);
+    key = fnv64(d->prog_hash, kind, sizeof kind);
+    if (!key) key = 1;
+    *keyp = key;
+    h = (unsigned)(key ^ (key >> 31)) & (VSH_CACHE - 1);
+    for (n = 0; n < VSH_CACHE; n++, h = (h + 1) & (VSH_CACHE - 1)) {
+        if (!g_vsh[h].done) break;
+        if (g_vsh[h].key == key) return g_vsh[h].sh;
+    }
+    if (n == VSH_CACHE || g_nvsh >= VSH_CACHE * 3 / 4) return 0;
+    g_nvsh++;
+    g_vsh[h].key = key;
+    g_vsh[h].done = 1;
+    g_vsh[h].sh = 0;
+    len = gles_vsh_glsl(d->prog, d->prog_len, d->inputs, kind, src, (int)sizeof src);
+    if (len <= 0) return 0;
+    {
+        double t0 = now_ms();
+        g_vsh[h].sh = compile(GL_VERTEX_SHADER, src, "nv2a vertex program");
+        g_nv_compiles++;
+        if (g_perf_on) perf_count(PC_COMPILE, 1);
+        g_nv_compile_ms += now_ms() - t0;
+    }
+    if (g_vsh[h].sh && (g_nvsh <= 64 || (g_nvsh % 64) == 0))
+        fprintf(stderr, "[NV2A-VSH] compiled vertex program %d (%d instructions)\n", g_nvsh, d->prog_len);
+    return g_vsh[h].sh;
+}
+
+/* The program of a vertex shader and a combiner shader, linked on first use. */
+static GLuint pair_get(uint64_t vkey, GLuint vs, int psi)
+{
+    uint64_t key = vkey * 0x9E3779B97F4A7C15ull ^ g_ps[psi].key;
+    unsigned h = (unsigned)(key ^ (key >> 29) ^ (key >> 47)) & (PAIR_CACHE - 1), n;
+    GLuint p;
+    if (!key) key = 1;
+    for (n = 0; n < PAIR_CACHE; n++, h = (h + 1) & (PAIR_CACHE - 1)) {
+        if (!g_pair[h].key) break;
+        if (g_pair[h].key == key) return g_pair[h].prog;
+    }
+    if (n == PAIR_CACHE || g_npair >= PAIR_CACHE * 3 / 4) return 0;
+    g_npair++;
+    {
+        double t0 = now_ms();
+        p = link2(vs, g_ps[psi].fs, "nv2a vertex program");
+        g_nv_compile_ms += now_ms() - t0;
+    }
+    g_pair[h].key = key;
+    g_pair[h].prog = p;
+    if (p) {
+        GLuint bi;
+        program_bind_units(p, "PshConsts");
+        bi = glGetUniformBlockIndex(p, "VshConsts");
+        if (bi != GL_INVALID_INDEX) glUniformBlockBinding(p, bi, 1);
+        bi = glGetUniformBlockIndex(p, "VshParams");
+        if (bi != GL_INVALID_INDEX) glUniformBlockBinding(p, bi, 2);
+        gles_invalidate_state();
+    }
+    return p;
+}
+
 int d3d8_points_gpu_on(void) { return 0; }
+
+/* OT_UPLOAD_STATS=1: what the vertex-program draws upload, per frame. */
+static int s_ustats = -1;
+static struct { double vb, vb_unique, ib, draws, frames; } s_us_acc;
+static struct { const uint8_t *base; uint32_t size; } s_us_seen[4096];
+static int s_us_nseen;
+
+static void ustats_vb(const uint8_t *base, uint32_t size)
+{
+    int j;
+    s_us_acc.vb += size;
+    for (j = 0; j < s_us_nseen; j++)
+        if (s_us_seen[j].base == base && s_us_seen[j].size == size) return;
+    s_us_acc.vb_unique += size;
+    if (s_us_nseen < 4096) { s_us_seen[s_us_nseen].base = base; s_us_seen[s_us_nseen].size = size; s_us_nseen++; }
+}
+
+void gles_frame_end(void)
+{
+    if (s_ustats <= 0) return;
+    s_us_nseen = 0;
+    if (++s_us_acc.frames >= 60) {
+        double f = s_us_acc.frames;
+        fprintf(stderr, "[UPLOAD] per frame: %.0f draws, vertices %.2f MB (%.2f MB distinct ranges), indices %.2f MB\n",
+                s_us_acc.draws / f, s_us_acc.vb / f / 1048576.0, s_us_acc.vb_unique / f / 1048576.0,
+                s_us_acc.ib / f / 1048576.0);
+        memset(&s_us_acc, 0, sizeof s_us_acc);
+    }
+}
+
+int d3d8_nv2a_vsh_ready(const Nv2aVshDraw *d)
+{
+    uint64_t key;
+    int a;
+    if (!vsh_on() || d->topology == D3DPT_POINTLIST) return 0;
+    for (a = 0; a < 16; a++) {
+        GLint n; GLenum t; GLboolean nm; int in;
+        if (!(d->inputs & (1u << a)) || (d->attr[a].kind & 0x0F) == NV2A_VSH_IN_CONST) continue;
+        if (!gl_attr_fmt(d->attr[a].dxgi_format, &n, &t, &nm, &in)) return 0;
+    }
+    return vsh_get(d, &key) != 0;
+}
+
+int d3d8_nv2a_draw_program_gpu(const Nv2aVshDraw *d)
+{
+    struct { const uint8_t *base; uint32_t stride, size; GLintptr off; } grp[16];
+    struct { float screen[4], fog[4], flags[4], vattr[16][4], point[4], glp[4]; } params;
+    int psi = ps_find(d->ps_key), a, g, ngrp = 0;
+    int8_t agrp[16];
+    uint16_t done = 0;
+    unsigned cmask = 0, amask = 0;
+    uint32_t bv = 0;
+    static uint32_t *ib;
+    static uint32_t ib_cap;
+    GLenum prim;
+    GLuint vs, prog;
+    GLintptr ioff;
+    uint64_t vkey;
+    double pt;
+
+    if (psi < 0 || !g_ps[psi].fs || !d->nindices || !vsh_on()) return 0;
+    switch (d->topology) {
+    case D3DPT_TRIANGLELIST: prim = GL_TRIANGLES;  break;
+    case D3DPT_LINELIST:     prim = GL_LINES;      break;
+    case D3DPT_LINESTRIP:    prim = GL_LINE_STRIP; break;
+    default: return 0;
+    }
+    gles_check_thread("nv2a_draw_program_gpu");
+    vs = vsh_get(d, &vkey);
+    if (!vs) return 0;
+    prog = pair_get(vkey, vs, psi);
+    if (!prog) return 0;
+    pt = g_perf_on ? perf_now() : 0.0;
+
+    /* Attributes interleaved in one array share an upload (d3d8_nv2a.c). */
+    memset(agrp, -1, sizeof agrp);
+    for (;;) {
+        int best = -1;
+        for (a = 0; a < 16; a++)
+            if ((d->inputs & (1u << a)) && !(done & (1u << a)) &&
+                (d->attr[a].kind & 0x0F) != NV2A_VSH_IN_CONST &&
+                (best < 0 || d->attr[a].base < d->attr[best].base))
+                best = a;
+        if (best < 0) break;
+        done |= (uint16_t)(1u << best);
+        a = best;
+        if (!d->attr[a].stride) { cmask |= 1u << a; continue; }
+        for (g = 0; g < ngrp; g++)
+            if (grp[g].stride == d->attr[a].stride && grp[g].stride &&
+                d->attr[a].base >= grp[g].base &&
+                (uint32_t)(d->attr[a].base - grp[g].base) < grp[g].stride)
+                break;
+        if (g == ngrp) {
+            grp[g].base = d->attr[a].base;
+            grp[g].stride = d->attr[a].stride;
+            grp[g].size = 0;
+            ngrp++;
+        }
+        {
+            uint32_t off = (uint32_t)(d->attr[a].base - grp[g].base);
+            if (off + d->attr[a].bytes > grp[g].size) grp[g].size = off + d->attr[a].bytes;
+        }
+        agrp[a] = (int8_t)g;
+    }
+
+    gles_apply_states(d->raster);
+    use_program(prog);
+    PERF_STEP(PZ_DSTATE);
+
+    glBindVertexArray(s_vao);
+    {
+        GLsizeiptr total = 0;
+        for (g = 0; g < ngrp; g++) total += grp[g].size + grp[g].stride;
+        stream_reserve(&s_vtx, total);
+    }
+    /* One array (the usual case): put it at a multiple of its stride and add
+     * that vertex number to the indices, so the pointers stay at the
+     * buffer's start and the next draw of the same layout sets none. */
+    for (g = 0; g < ngrp; g++) {
+        grp[g].off = stream_put(&s_vtx, grp[g].base, (GLsizeiptr)grp[g].size,
+                                ngrp == 1 ? (GLsizeiptr)grp[g].stride : 4);
+        if (grp[g].off < 0) return 0;
+    }
+    if (s_ustats < 0) s_ustats = getenv("OT_UPLOAD_STATS") != NULL;
+    if (s_ustats) {
+        for (g = 0; g < ngrp; g++) ustats_vb(grp[g].base, grp[g].size);
+        s_us_acc.ib += d->nindices * 4.0;
+        s_us_acc.draws++;
+    }
+    if (ngrp == 1) { bv = (uint32_t)(grp[0].off / grp[0].stride); grp[0].off = 0; }
+    for (a = 0; a < 16; a++) if (agrp[a] >= 0) amask |= 1u << a;
+    attribs_mask(amask);
+    {
+        uint64_t lay = 0;
+        if (ngrp == 1) {
+            lay = fnv64(1469598103934665603ull, &grp[0].stride, 4);
+            for (a = 0; a < 16; a++)
+                if (agrp[a] >= 0) {
+                    uint32_t v[3] = { (uint32_t)a, d->attr[a].dxgi_format,
+                                      (uint32_t)(d->attr[a].base - grp[0].base) };
+                    lay = fnv64(lay, v, sizeof v);
+                }
+            lay = (lay | 1ull << 62) & ~(1ull << 63);
+        }
+        if (!lay || lay != S.layout) {
+            for (a = 0; a < 16; a++) {
+                GLint n; GLenum t; GLboolean nm; int in;
+                const void *p;
+                g = agrp[a];
+                if (g < 0 || !gl_attr_fmt(d->attr[a].dxgi_format, &n, &t, &nm, &in)) continue;
+                p = (const void *)(grp[g].off + (GLintptr)(d->attr[a].base - grp[g].base));
+                if (in) glVertexAttribIPointer((GLuint)a, n, t, (GLsizei)grp[g].stride, p);
+                else    glVertexAttribPointer((GLuint)a, n, t, nm, (GLsizei)grp[g].stride, p);
+            }
+            S.layout = lay;
+        }
+    }
+    for (a = 0; a < 16; a++)
+        if (cmask & (1u << a)) attr_const_set((GLuint)a, d->attr[a].dxgi_format, d->attr[a].base);
+    s_cur_dirty |= cmask;
+    if (bv) {
+        uint32_t k;
+        if (d->nindices > ib_cap) {
+            uint32_t *nb = (uint32_t *)realloc(ib, (size_t)d->nindices * 4);
+            if (!nb) return 0;
+            ib = nb;
+            ib_cap = d->nindices;
+        }
+        for (k = 0; k < d->nindices; k++) ib[k] = d->indices[k] + bv;
+        ioff = stream_put(&s_idx, ib, (GLsizeiptr)d->nindices * 4, 4);
+    } else
+        ioff = stream_put(&s_idx, d->indices, (GLsizeiptr)d->nindices * 4, 4);
+    if (ioff < 0) return 0;
+    {
+        static int dumped = -1;
+        static uint64_t seen[256];
+        static int nseen;
+        if (dumped < 0) dumped = getenv("OT_VSH_DUMP") ? 0 : 1;
+        if (!dumped && nseen < 256) {
+            uint8_t kind[16];
+            uint64_t k;
+            int j, s0 = 0;
+            vsh_kinds(d, kind);
+            k = fnv64(d->prog_hash, kind, sizeof kind);
+            for (a = 0; a < 16; a++) k = fnv64(k, &d->attr[a].stride, 4);
+            for (j = 0; j < nseen; j++) if (seen[j] == k) break;
+            if (j == nseen) {
+                seen[nseen++] = k;
+                fprintf(stderr, "[VSH-DUMP] prog %016llX len %d n %u:", (unsigned long long)d->prog_hash,
+                        d->prog_len, d->nindices);
+                for (a = 0; a < 16; a++)
+                    if ((d->inputs & (1u << a)) && (d->attr[a].kind & 0x0F) != NV2A_VSH_IN_CONST)
+                        fprintf(stderr, " v%d:k%02X/f%u/s%u/o%d", a, d->attr[a].kind, d->attr[a].dxgi_format,
+                                d->attr[a].stride, agrp[a] >= 0 ? (int)(d->attr[a].base - grp[agrp[a]].base) : -1);
+                fprintf(stderr, "\n");
+                (void)s0;
+            }
+        }
+    }
+    PERF_STEP(PZ_DUP);
+
+    memset(&params, 0, sizeof params);
+    params.screen[0] = d->screen_w;
+    params.screen[1] = d->screen_h;
+    params.screen[2] = d->clip_max;
+    params.screen[3] = d->point_zoom;
+    params.fog[0] = (float)d->fog_mode;
+    params.fog[1] = d->fog_p0;
+    params.fog[2] = d->fog_p1;
+    params.flags[0] = d->specular ? 1.0f : 0.0f;
+    params.flags[1] = d->spec_alpha ? 1.0f : 0.0f;
+    params.point[0] = d->point_params ? 1.0f : 0.0f;
+    params.point[1] = d->point_size;
+    params.point[2] = d->point_smooth ? 1.0f : 0.0f;
+    params.point[3] = d->point_kx;
+    params.glp[0] = (!(d->raster & 1) && !s_has_depth_clamp) ? 1.0f : 0.0f;
+    if (d->attr_const) memcpy(params.vattr, d->attr_const, sizeof params.vattr);
+    stream_reserve(&s_ubo, (GLsizeiptr)(VSHCPU_CONSTANTS * 16 + sizeof params + d->ps_consts_size) +
+                           3 * s_ubo_align);
+    if (!ubo_bind(1, d->vconst, VSHCPU_CONSTANTS * 16) || !ubo_bind(2, &params, sizeof params) ||
+        !ubo_bind(0, d->ps_consts, d->ps_consts_size))
+        return 0;
+    PERF_STEP(PZ_DCB);
+
+    glDrawElements(prim, (GLsizei)d->nindices, GL_UNSIGNED_INT, (const void *)ioff);
+    if (getenv("OT_VSH_DUMP")) {
+        static int n;
+        GLenum e = glGetError();
+        if (e && n++ < 10) fprintf(stderr, "[VSH-DUMP] GL error %04X\n", e);
+    }
+    PERF_STEP(PZ_DDRAW);
+    return 1;
+}
 int d3d8_points_check_on(void) { return 0; }
 void d3d8_nv2a_points_expect(const void *v, unsigned n, unsigned s) { (void)v; (void)n; (void)s; }
 
@@ -848,32 +1349,33 @@ static void ffp_attribs(DWORD fvf, UINT stride, GLintptr base)
 {
     GLintptr off = base;
     int ntex = (int)((fvf >> 8) & 0xF), t;
-    disable_attribs(0);
+    unsigned m = 1;
+    S.layout = 0;
+    attribs_clean_current();
     if (fvf & D3DFVF_XYZRHW) {
-        glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, (GLsizei)stride, (const void *)off);
         off += 16;
     } else {
-        glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, (GLsizei)stride, (const void *)off);
         off += 12;
     }
     if (fvf & D3DFVF_NORMAL) off += 12;
     if (fvf & D3DFVF_DIFFUSE) {
-        glEnableVertexAttribArray(1);
+        m |= 2;
         glVertexAttribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, (GLsizei)stride, (const void *)off);
         off += 4;
     }
     if (fvf & D3DFVF_SPECULAR) {
-        glEnableVertexAttribArray(2);
+        m |= 4;
         glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, (GLsizei)stride, (const void *)off);
         off += 4;
     }
     for (t = 0; t < ntex && t < 4; t++) {
-        glEnableVertexAttribArray((GLuint)(4 + t));
+        m |= 1u << (4 + t);
         glVertexAttribPointer((GLuint)(4 + t), 2, GL_FLOAT, GL_FALSE, (GLsizei)stride, (const void *)off);
         off += 8;
     }
+    attribs_mask(m);
 }
 
 HRESULT gles_draw_ffp(D3DPRIMITIVETYPE prim, UINT prim_count, const void *verts, UINT stride,
@@ -947,7 +1449,7 @@ void gles_blit(GLuint tex, int x, int y, int w, int h, int flip_v, GLuint lut)
     glBindTexture(GL_TEXTURE_2D, lut);
     glBindSampler(1, 0);
     glBindVertexArray(s_vao);
-    disable_attribs(0);
+    attribs_mask(0);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     gles_invalidate_state();
 }

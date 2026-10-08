@@ -21,7 +21,7 @@ FetchContent_MakeAvailable(SDL2)
 # x86 semantics the translated code and the runtime were written for:
 # signed char, and no fused multiply-add (ARM's default would round the
 # game's float maths differently from the Xbox and the PC builds).
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsigned-char -ffp-contract=off -Wno-int-conversion -Wno-incompatible-pointer-types")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsigned-char -ffp-contract=off -Wno-int-conversion -Wno-incompatible-pointer-types -Wno-parentheses-equality -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0")
 set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../port ${CMAKE_BINARY_DIR}/port)
