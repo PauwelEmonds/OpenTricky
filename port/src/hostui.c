@@ -32,6 +32,7 @@ typedef struct D3D8HostUiHooks {
 void d3d8_SetHostUiHooks(const D3D8HostUiHooks *hooks);
 void d3d8_HostSetFullscreen(int on);
 int  d3d8_HostIsFullscreen(void);
+#ifdef _WIN32
 void d3d8_RequestScreenshot(const wchar_t *path);
 
 static void exe_dir_w(WCHAR *out, size_t n)
@@ -55,6 +56,24 @@ static void take_screenshot(void)
              t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
     d3d8_RequestScreenshot(path);
 }
+#else
+/* POSIX: UTF-8 paths. The folder is the runtime's choice (beside the game on
+ * Linux, the app's files on Android): d3d8_ScreenshotDir(). */
+void d3d8_RequestScreenshotUtf8(const char *path);
+const char *d3d8_ScreenshotDir(void);
+
+static void take_screenshot(void)
+{
+    char path[1024];
+    SYSTEMTIME t;
+    const char *dir = d3d8_ScreenshotDir();
+    CreateDirectoryA(dir, NULL);
+    GetLocalTime(&t);
+    snprintf(path, sizeof path, "%s/SSX Tricky %04u-%02u-%02u %02u-%02u-%02u.png", dir,
+             t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+    d3d8_RequestScreenshotUtf8(path);
+}
+#endif
 
 static int on_key(HWND h, UINT vk)
 {

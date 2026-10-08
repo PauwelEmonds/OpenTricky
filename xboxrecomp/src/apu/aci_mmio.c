@@ -35,6 +35,7 @@
 
 #include "aci_mmio.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Register file. Reads and writes land here; the side effects below are what
@@ -386,6 +387,26 @@ bool aci_mmio_install(void *mem_base)
     return true;
 }
 
-#else
-bool aci_mmio_install(void *mem_base) { (void)mem_base; return false; }
+#else /* POSIX: the aperture is trapped through posix_fault.c */
+
+#include "platform/posix_fault.h"
+
+static uint64_t aci_pf_read(void *ud, uint32_t off, unsigned size)
+{ (void)ud; return aci_read(off, size); }
+static void aci_pf_write(void *ud, uint32_t off, uint64_t val, unsigned size)
+{ (void)ud; aci_write(off, val, size); }
+
+bool aci_mmio_install(void *mem_base)
+{
+    int ch;
+    memset(g_aci_regs, 0, sizeof(g_aci_regs));
+    for (ch = 0; ch < ACI_NABM_CHANNELS; ch++)
+        g_aci_regs[ACI_NABM_OFF + ch * ACI_CHANNEL_STRIDE + 0x06] = ACI_SR_DCH;
+    if (!pf_mmio_register((uint8_t *)mem_base + XBOX_ACI_MMIO_BASE, XBOX_ACI_MMIO_SIZE,
+                          "ACI", aci_pf_read, aci_pf_write, NULL))
+        return false;
+    fprintf(stderr, "  [ACI] AC'97 aperture trapped at Xbox VA 0x%08X (%u bytes)\n",
+            XBOX_ACI_MMIO_BASE, XBOX_ACI_MMIO_SIZE);
+    return true;
+}
 #endif /* _WIN32 */

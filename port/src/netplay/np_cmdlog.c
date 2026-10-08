@@ -2,9 +2,7 @@
  * np_cmdlog -- journal des commandes et de l'état des riders (fork).
  * Voir np_cmdlog.h pour l'interrupteur, les hooks, les offsets et le format.
  */
-#ifdef _WIN32
 #include <windows.h>
-#endif
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>

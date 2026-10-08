@@ -5,6 +5,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <windows.h>   /* _stricmp */
+#endif
 #include "recomp/recomp_types.h"
 #include "drawdist.h"
 

@@ -450,9 +450,32 @@ bool nv2a_hook_handle_vram(uintptr_t fault_addr, uint32_t fault_xbox_va)
     return false;
 }
 
-#else /* !_WIN32 -- SIGSEGV-based MMIO trapping deferred to main.c port */
+#else /* !_WIN32 -- the DAC page is trapped through posix_fault.c */
 
-bool nv2a_dac_trap_install(uint8_t *mem_base) { (void)mem_base; return false; }
+#include "platform/posix_fault.h"
+
+static uint64_t dac_pf_read(void *ud, uint32_t off, unsigned size)
+{
+    NV2AState *nv2a = nv2a_get_state();
+    (void)ud;
+    return nv2a_mmio_read(nv2a, NV2A_PRMDIO_OFFSET + off, size);
+}
+static void dac_pf_write(void *ud, uint32_t off, uint64_t val, unsigned size)
+{
+    NV2AState *nv2a = nv2a_get_state();
+    (void)ud;
+    nv2a_mmio_write(nv2a, NV2A_PRMDIO_OFFSET + off, val, size);
+}
+
+bool nv2a_dac_trap_install(uint8_t *mem_base)
+{
+    if (!pf_mmio_register(mem_base + NV2A_MMIO_BASE + NV2A_PRMDIO_OFFSET, 0x1000, "DAC",
+                          dac_pf_read, dac_pf_write, NULL))
+        return false;
+    fprintf(stderr, "  [DAC] palette registers trapped at Xbox VA 0x%08X (4 KB)\n",
+            NV2A_MMIO_BASE + NV2A_PRMDIO_OFFSET);
+    return true;
+}
 bool nv2a_dac_handle_mmio(PCONTEXT ctx, uint32_t fault_xbox_va, int is_write)
 { (void)ctx; (void)fault_xbox_va; (void)is_write; return false; }
 

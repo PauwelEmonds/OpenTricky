@@ -24,8 +24,10 @@ if(WIN32)
     add_library(platform INTERFACE)
     target_include_directories(platform INTERFACE ${XBOXRECOMP_SRC_DIR})
 else()
-    add_library(platform STATIC win32_compat.c)
+    add_library(platform STATIC win32_compat.c posix_fault.c)
+    # posix/ supplies <windows.h> and friends on top of win32_compat.
     target_include_directories(platform PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/posix
         ${XBOXRECOMP_SRC_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}
     )

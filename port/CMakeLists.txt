@@ -15,7 +15,9 @@ project(ssx_tricky C)
 
 # The launcher's icon and manifest (src/ssx_recomp.rc.in) need the resource
 # compiler (windres with MinGW, rc.exe with MSVC).
-enable_language(RC)
+if(WIN32)
+    enable_language(RC)
+endif()
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -41,6 +43,7 @@ if(NOT RECOMP_GEN_SOURCES)
         "stored in this repository -- see docs/building.md.")
 endif()
 
+if(WIN32)
 # ── Icon ───────────────────────────────────────────────────────
 # Made at build time from the player's own game files, in the build directory
 # only (tools/make_icon.py: the Garibaldi track badge by default);
@@ -72,6 +75,7 @@ set(SSX_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/src/ssx_recomp.manifest")
 configure_file(src/ssx_recomp.rc.in "${CMAKE_CURRENT_BINARY_DIR}/ssx_recomp.rc" @ONLY)
 set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/ssx_recomp.rc" PROPERTIES
     OBJECT_DEPENDS "${SSX_APP_ICON}")
+endif()
 
 set(GAME_SOURCES
     src/main.c
@@ -79,7 +83,6 @@ set(GAME_SOURCES
     src/discart.c
     src/controls.c
     src/hostui.c
-    "${CMAKE_CURRENT_BINARY_DIR}/ssx_recomp.rc"
     src/recomp_manual.c
     src/pass_tags.c
     src/fps_cap.c
@@ -93,17 +96,29 @@ set(GAME_SOURCES
     src/recomp/recomp_probe.c
 )
 
-add_executable(${PROJECT_NAME} WIN32
-    ${GAME_SOURCES}
-    ${RECOMP_GEN_SOURCES}
-)
+if(WIN32)
+    list(APPEND GAME_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/ssx_recomp.rc")
+endif()
+
+if(ANDROID)
+    # SDL's Java activity loads the game as libmain.so and calls SDL_main.
+    add_library(${PROJECT_NAME} SHARED ${GAME_SOURCES} ${RECOMP_GEN_SOURCES})
+elseif(WIN32)
+    add_executable(${PROJECT_NAME} WIN32 ${GAME_SOURCES} ${RECOMP_GEN_SOURCES})
+else()
+    add_executable(${PROJECT_NAME} ${GAME_SOURCES} ${RECOMP_GEN_SOURCES})
+endif()
 
 # Name the executable after the title in the XBE certificate ("SSX Tricky"),
 # falling back to that name when no XBE is present.
 include(${XBOXRECOMP_DIR}/cmake/XbeTitleName.cmake)
 xbe_title_name(GAME_TITLE "${CMAKE_CURRENT_SOURCE_DIR}/../game_files/default.xbe"
                FALLBACK "SSX Tricky")
-set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "${GAME_TITLE}")
+if(ANDROID)
+    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "main")
+else()
+    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "${GAME_TITLE}")
+endif()
 message(STATUS "Executable will be named: ${GAME_TITLE}.exe")
 
 target_link_libraries(${PROJECT_NAME} PRIVATE xboxrecomp)
@@ -114,6 +129,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${XBOXRECOMP_DIR}/include
 )
 
+if(WIN32)
 target_link_libraries(${PROJECT_NAME} PRIVATE
     d3d11
     dxgi
@@ -127,6 +143,13 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     uuid
     d3dcompiler
 )
+else()
+    find_package(SDL2 REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2 m)
+    if(NOT ANDROID)
+        target_link_libraries(${PROJECT_NAME} PRIVATE dl)
+    endif()
+endif()
 
 if(MSVC)
     target_link_options(${PROJECT_NAME} PRIVATE /LARGEADDRESSAWARE)

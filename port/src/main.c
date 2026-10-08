@@ -42,6 +42,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#ifndef _WIN32
+#include <SDL.h>                     /* SDL_main on Android */
+#include "platform/posix_fault.h"
+#endif
 
 /* xboxrecomp runtime headers */
 #include <xbox/xboxrecomp.h>
@@ -147,6 +151,40 @@ static BOOL load_xbe(const char *path, void **out_data, size_t *out_size);
  * NULL. Lets a different game/image be pointed at without a rebuild --
  * useful now that the disc is read straight out of an ISO.
  */
+#ifndef _WIN32
+static int    s_argc;
+static char **s_argv;
+
+static const char *find_iso_argument(void)
+{
+    int i;
+    for (i = 1; i < s_argc; i++) {
+        size_t len = strlen(s_argv[i]);
+        if (len > 4 && strcasecmp(s_argv[i] + len - 4, ".iso") == 0)
+            return s_argv[i];
+    }
+    return NULL;
+}
+
+/* TRUE if `flag` is on the command line. Kept as a WCHAR-literal API for the
+ * callers; on POSIX the flags are plain ASCII. */
+#define has_flag(f) has_flag_a(#f)
+static BOOL has_flag_a(const char *quoted)
+{
+    /* #f of L"--direct" is "L\"--direct\"": strip the L and the quotes. */
+    char flag[64];
+    size_t n;
+    int i;
+    if (quoted[0] == 'L') quoted++;
+    if (quoted[0] == '"') quoted++;
+    snprintf(flag, sizeof flag, "%s", quoted);
+    n = strlen(flag);
+    if (n && flag[n - 1] == '"') flag[n - 1] = 0;
+    for (i = 1; i < s_argc; i++)
+        if (strcasecmp(s_argv[i], flag) == 0) return TRUE;
+    return FALSE;
+}
+#else
 static const char *find_iso_argument(void)
 {
     static char arg[MAX_PATH];
@@ -178,6 +216,7 @@ static BOOL has_flag(const WCHAR *flag)
     LocalFree(wargv);
     return found;
 }
+#endif /* _WIN32 */
 
 /*
  * TRUE when standard output goes somewhere other than a person: a pipe, a
@@ -232,7 +271,7 @@ static void resolve_from_exe(const char *rel, char *out, size_t out_sz);
 
 static void resolve_from_exe_or_absolute(const char *p, char *out, size_t out_sz)
 {
-    BOOL absolute = (p[0] && p[1] == ':') || (p[0] == '\\' && p[1] == '\\');
+    BOOL absolute = (p[0] && p[1] == ':') || (p[0] == '\\' && p[1] == '\\') || p[0] == '/';
     if (absolute) {
         strncpy(out, p, out_sz - 1);
         out[out_sz - 1] = '\0';
@@ -254,10 +293,17 @@ static void resolve_from_exe(const char *rel, char *out, size_t out_sz)
         return;
     }
 
+#ifdef _WIN32
     slash = strrchr(exe, '\\');
     if (slash) *slash = '\0'; else exe[0] = '\0';
 
     snprintf(joined, sizeof(joined), "%s\\%s", exe, rel);
+#else
+    slash = strrchr(exe, '/');
+    if (slash) *slash = '\0'; else exe[0] = '\0';
+
+    snprintf(joined, sizeof(joined), "%s/%s", exe[0] ? exe : ".", rel);
+#endif
 
     if (GetFullPathNameA(joined, (DWORD)out_sz, out, NULL) == 0) {
         strncpy(out, joined, out_sz - 1);
@@ -285,6 +331,41 @@ extern size_t recomp_dispatch_init(void);
  *   - Add dumps of game-specific globals (heap handles, state flags)
  *   - Add SEH simulation if your game uses __try/__except
  */
+#ifndef _WIN32
+/* POSIX crash report (posix_fault.c calls it before the default action). The
+ * device apertures are emulated there; anything reaching this is a real fault. */
+extern volatile unsigned g_last_loc;
+static void posix_crash_report(int sig, const char *what, void *addr, uintptr_t pc,
+                               void **frames, int nframes)
+{
+    uintptr_t base = (uintptr_t)GetModuleHandle(NULL);
+    int i;
+    (void)sig;
+    fprintf(stderr, "[CRASH] %s at pc %p (offset 0x%llX), fault address %p"
+                    " (Xbox VA 0x%08X) [last label: loc_%08X]\n",
+            what, (void *)pc, (unsigned long long)(pc - base), addr,
+            (uint32_t)((uintptr_t)addr - (uintptr_t)g_xbox_mem_offset), g_last_loc);
+    fprintf(stderr, "  Xbox regs: eax=0x%08X ecx=0x%08X edx=0x%08X esp=0x%08X\n",
+            g_eax, g_ecx, g_edx, g_esp);
+    fprintf(stderr, "  Xbox regs: ebx=0x%08X esi=0x%08X edi=0x%08X\n", g_ebx, g_esi, g_edi);
+    fprintf(stderr, "  Host frames (offsets for addr2line):");
+    for (i = 0; i < nframes; i++)
+        fprintf(stderr, " 0x%llX", (unsigned long long)((uintptr_t)frames[i] - base));
+    fprintf(stderr, "\n");
+    fflush(stderr);
+    if (s_crash_dialog) {
+        char msg[MAX_PATH + 256];
+        if (s_log_path[0])
+            snprintf(msg, sizeof msg, "SSX Tricky stopped because of an error (%s).\n\n"
+                     "The details are in the log file:\n%s", what, s_log_path);
+        else
+            snprintf(msg, sizeof msg, "SSX Tricky stopped because of an error (%s).\n\n"
+                     "To record the details next time, turn on \"Write a log file\" in Settings.",
+                     what);
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "SSX Tricky", msg, NULL);
+    }
+}
+#else
 static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
 {
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ILLEGAL_INSTRUCTION) {
@@ -501,6 +582,7 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
 
     return EXCEPTION_CONTINUE_SEARCH;
 }
+#endif /* _WIN32 */
 
 /*
  * Who reads guest VA 8 / 0xC?
@@ -618,7 +700,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     launcher_enable_dpi_awareness();
 
     /* Install VEH handler (first handler in chain) */
+#ifdef _WIN32
     AddVectoredExceptionHandler(1, veh_handler);
+#else
+    pf_install(posix_crash_report);
+#endif
 
     /* Rider command log (XBOX_NETLOG=1). Off by default, and then
      * recomp_lookup_manual() hands out none of its hooks. */
@@ -1235,6 +1321,7 @@ static BOOL load_xbe(const char *path, void **out_data, size_t *out_size)
  * (a single store, measured free), which turns a bare fault into the guest
  * address that was executing when it happened.
  * ------------------------------------------------------------------ */
+#ifdef _WIN32
 extern volatile unsigned g_last_loc;
 
 static LONG WINAPI recomp_crash_filter(EXCEPTION_POINTERS *ep)
@@ -1286,3 +1373,11 @@ int main(int argc, char **argv)
     (void)argv;
     return WinMain(GetModuleHandle(NULL), NULL, GetCommandLineA(), SW_SHOW);
 }
+#else
+int main(int argc, char **argv)
+{
+    s_argc = argc;
+    s_argv = argv;
+    return WinMain(GetModuleHandle(NULL), NULL, NULL, SW_SHOW);
+}
+#endif

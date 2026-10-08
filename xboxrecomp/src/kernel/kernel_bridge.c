@@ -26,7 +26,9 @@
  */
 
 #include "xbox_perf.h"
+#if defined(__x86_64__) || defined(__i386__)
 #include <xmmintrin.h>
+#endif
 #include "kernel.h"
 #include "xbox_memory_layout.h"
 #include <stdio.h>
@@ -4231,6 +4233,7 @@ static __thread int  t_trap_nan_on = 0;
 /* Report an invalid-operation trap with a native backtrace, then mask the
  * exception again in the faulting context and retry: the operation produces
  * its NaN as it would have, and the run continues to the next report. */
+#ifdef _WIN32
 static LONG CALLBACK trap_nan_veh(EXCEPTION_POINTERS *ep)
 {
     static volatile LONG reports = 0;
@@ -4254,13 +4257,16 @@ static LONG CALLBACK trap_nan_veh(EXCEPTION_POINTERS *ep)
     ep->ContextRecord->MxCsr |= 0x0080u;          /* mask IM, retry */
     return EXCEPTION_CONTINUE_EXECUTION;
 }
+#endif /* _WIN32: the NaN trap is a Windows/x86 diagnostic */
 
 static void trap_nan_check_path(const char *path)
 {
     static const char *want = (const char *)-1;
     if (want == (const char *)-1) want = getenv("XBOX_TRAP_NAN_FILE");
     if (want && *want && path && strstr(path, want) && !g_trap_nan_armed) {
+#ifdef _WIN32
         AddVectoredExceptionHandler(1, trap_nan_veh);
+#endif
         InterlockedExchange(&g_trap_nan_armed, 1);
         fprintf(stderr, "  [TRAPNAN] armed on %s\n", path);
         fflush(stderr);
@@ -4271,7 +4277,9 @@ static void kernel_thunk_dispatch(void)
 {
     if (g_trap_nan_armed && !t_trap_nan_on) {
         t_trap_nan_on = 1;
+#ifdef _WIN32
         _mm_setcsr(_mm_getcsr() & ~0x0080u);   /* unmask invalid (IM) */
+#endif
     }
     xbox_apply_tls_index_once();
     /* Sample the push buffer on the guest's own thread while the translator is

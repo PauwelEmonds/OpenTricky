@@ -29,6 +29,18 @@
 #include <string.h>
 #include <stdint.h>
 
+#ifndef _WIN32
+/* POSIX: use the platform's own profilers (perf on Linux, simpleperf on
+ * Android), which can sample the process from outside. */
+void xbox_profile_note_stall(LONGLONG qpc_start, LONGLONG qpc_end)
+{ (void)qpc_start; (void)qpc_end; }
+void xbox_profile_start_from_env(void)
+{
+    if (getenv("XBOX_PROFILE"))
+        fprintf(stderr, "[PROFILE] XBOX_PROFILE is Windows-only; use perf / simpleperf\n");
+}
+#else
+
 #define MAX_THREADS 64
 #define MAX_SITES   8192
 
@@ -318,3 +330,5 @@ void xbox_profile_start_from_env(void)
     h = CreateThread(NULL, 0, prof_main, spec, 0, NULL);
     if (h) CloseHandle(h);
 }
+
+#endif /* _WIN32 */

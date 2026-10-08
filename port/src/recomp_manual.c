@@ -18,9 +18,7 @@
  *   - Intercept D3D/audio calls for custom rendering or sound
  */
 
-#ifdef _WIN32
 #include <windows.h>
-#endif
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>

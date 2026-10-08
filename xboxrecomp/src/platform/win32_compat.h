@@ -529,6 +529,178 @@ static inline MMRESULT waveOutWrite(HWAVEOUT h, WAVEHDR *hdr, UINT sz)
 static inline MMRESULT waveOutReset(HWAVEOUT h) { (void)h; return MMSYSERR_NOERROR; }
 static inline MMRESULT waveOutClose(HWAVEOUT h) { (void)h; return MMSYSERR_NOERROR; }
 
+
+/* ===================================================================== */
+/* OpenTricky additions: the rest of the Win32 subset the SSX Tricky port */
+/* and its runtime use, so the same sources build for Linux and Android. */
+/* ===================================================================== */
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <unistd.h>
+
+#ifndef MAX_PATH
+#define MAX_PATH 260
+#endif
+typedef uint64_t DWORD64, *PDWORD64;
+#define MAXIMUM_WAIT_OBJECTS        64
+#define INVALID_FILE_ATTRIBUTES     ((DWORD)-1)
+#define MEM_PRIVATE                 0x00020000u
+#define MEM_MAPPED                  0x00040000u
+#define MEM_IMAGE                   0x01000000u
+#define MEM_FREE                    0x00010000u
+#define PAGE_GUARD                  0x100u
+#define ERROR_NOT_OWNER             288u
+#define TIMER_ALL_ACCESS            0x001F0003u
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002u
+#define MB_TOPMOST                  0x00040000u
+#define MB_YESNO                    0x00000004u
+#define MB_ICONQUESTION             0x00000020u
+#define IDOK                        1
+#define IDCANCEL                    2
+#define IDYES                       6
+#define IDNO                        7
+#define SW_SHOW                     5
+#define FILE_TYPE_UNKNOWN           0x0000u
+#define FILE_TYPE_DISK              0x0001u
+#define FILE_TYPE_CHAR              0x0002u
+#define FILE_TYPE_PIPE              0x0003u
+#define STD_INPUT_HANDLE            ((DWORD)-10)
+#define STD_OUTPUT_HANDLE           ((DWORD)-11)
+#define STD_ERROR_HANDLE            ((DWORD)-12)
+#define TIMERR_NOERROR              0u
+
+/* Extra exception codes named by the crash reporter. */
+#define EXCEPTION_DATATYPE_MISALIGNMENT  0x80000002u
+#define EXCEPTION_BREAKPOINT             0x80000003u
+#define EXCEPTION_SINGLE_STEP            0x80000004u
+#define EXCEPTION_ARRAY_BOUNDS_EXCEEDED  0xC000008Cu
+#define EXCEPTION_INT_OVERFLOW           0xC0000095u
+#define EXCEPTION_PRIV_INSTRUCTION       0xC0000096u
+#define EXCEPTION_IN_PAGE_ERROR          0xC0000006u
+
+/* Extra virtual keys (controls rebinding names them). */
+#define VK_F6 0x75
+#define VK_F7 0x76
+#define VK_F8 0x77
+#define VK_F9 0x78
+#define VK_F10 0x79
+#define VK_F11 0x7A
+#define VK_F24 0x87
+#define VK_LWIN 0x5B
+#define VK_RWIN 0x5C
+#define VK_NUMPAD0 0x60
+#define VK_NUMPAD1 0x61
+#define VK_NUMPAD2 0x62
+#define VK_NUMPAD3 0x63
+#define VK_NUMPAD4 0x64
+#define VK_NUMPAD5 0x65
+#define VK_NUMPAD6 0x66
+#define VK_NUMPAD7 0x67
+#define VK_NUMPAD8 0x68
+#define VK_NUMPAD9 0x69
+#define VK_SEPARATOR 0x6C
+#define VK_DECIMAL 0x6E
+#define VK_NUMLOCK 0x90
+#define VK_SCROLL 0x91
+#define VK_LSHIFT 0xA0
+#define VK_RSHIFT 0xA1
+#define VK_LCONTROL 0xA2
+#define VK_RCONTROL 0xA3
+#define VK_LMENU 0xA4
+#define VK_RMENU 0xA5
+#define VK_OEM_1 0xBA
+#define VK_OEM_2 0xBF
+#define VK_OEM_3 0xC0
+#define VK_OEM_4 0xDB
+#define VK_OEM_5 0xDC
+#define VK_OEM_6 0xDD
+#define VK_OEM_7 0xDE
+#define VK_OEM_102 0xE2
+#define MAPVK_VK_TO_VSC    0
+#define MAPVK_VSC_TO_VK    1
+#define MAPVK_VK_TO_CHAR   2
+#define MAPVK_VSC_TO_VK_EX 3
+
+/* Slim reader/writer locks. */
+typedef struct { pthread_rwlock_t rw; } SRWLOCK, *PSRWLOCK;
+#define SRWLOCK_INIT { PTHREAD_RWLOCK_INITIALIZER }
+VOID InitializeSRWLock(PSRWLOCK l);
+VOID AcquireSRWLockExclusive(PSRWLOCK l);
+VOID ReleaseSRWLockExclusive(PSRWLOCK l);
+VOID AcquireSRWLockShared(PSRWLOCK l);
+VOID ReleaseSRWLockShared(PSRWLOCK l);
+BOOLEAN TryAcquireSRWLockExclusive(PSRWLOCK l);
+
+/* Atomics and barriers. */
+PVOID InterlockedExchangePointer(PVOID volatile *Target, PVOID Value);
+LONGLONG InterlockedExchange64(volatile LONGLONG *Target, LONGLONG Value);
+LONGLONG InterlockedExchangeAdd64(volatile LONGLONG *Addend, LONGLONG Value);
+LONGLONG InterlockedCompareExchange64(volatile LONGLONG *Dest, LONGLONG Exchange, LONGLONG Comparand);
+LONG InterlockedOr(volatile LONG *Target, LONG Value);
+LONG InterlockedAnd(volatile LONG *Target, LONG Value);
+#define MemoryBarrier()  __atomic_thread_fence(__ATOMIC_SEQ_CST)
+#if defined(__x86_64__) || defined(__i386__)
+#define YieldProcessor() __builtin_ia32_pause()
+#elif defined(__aarch64__) || defined(__arm__)
+#define YieldProcessor() __asm__ __volatile__("yield")
+#else
+#define YieldProcessor() ((void)0)
+#endif
+#define _ReadWriteBarrier() __atomic_signal_fence(__ATOMIC_SEQ_CST)
+
+/* Waitable timers (absolute deadlines on CLOCK_MONOTONIC; auto-reset). */
+HANDLE CreateWaitableTimerExW(LPSECURITY_ATTRIBUTES sa, LPCWSTR name, DWORD flags, DWORD access);
+HANDLE CreateWaitableTimerW(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, LPCWSTR name);
+BOOL   SetWaitableTimer(HANDLE timer, const LARGE_INTEGER *due, LONG period,
+                        PVOID completion, PVOID arg, BOOL resume);
+BOOL   CancelWaitableTimer(HANDLE timer);
+
+/* Diagnostics: a real backtrace (unwinder) and the module base for RVAs. */
+USHORT CaptureStackBackTrace(ULONG skip, ULONG count, PVOID *frames, PULONG hash);
+HMODULE GetModuleHandleA(LPCSTR name);
+HMODULE GetModuleHandleW(LPCWSTR name);
+#define GetModuleHandle GetModuleHandleA
+DWORD  GetModuleFileNameA(HMODULE mod, LPSTR buf, DWORD size);
+DWORD  GetModuleFileNameW(HMODULE mod, LPWSTR buf, DWORD size);
+BOOL   IsDebuggerPresent(void);
+VOID   DebugBreak(void);
+BOOL   HeapValidate(HANDLE heap, DWORD flags, LPCVOID mem);
+HLOCAL LocalFree(HLOCAL mem);
+
+/* Files and paths. */
+DWORD  GetTempPathA(DWORD size, LPSTR buf);
+BOOL   CreateDirectoryA(LPCSTR path, LPSECURITY_ATTRIBUTES sa);
+DWORD  GetFileAttributesA(LPCSTR path);
+DWORD  GetFullPathNameA(LPCSTR name, DWORD size, LPSTR buf, LPSTR *filePart);
+BOOL   DeleteFileA(LPCSTR path);
+BOOL   MoveFileExA(LPCSTR from, LPCSTR to, DWORD flags);
+#define MOVEFILE_REPLACE_EXISTING 0x1u
+#define MOVEFILE_WRITE_THROUGH    0x8u
+DWORD  GetFileType(HANDLE h);
+HANDLE GetStdHandle(DWORD which);
+BOOL   GetConsoleMode(HANDLE h, LPDWORD mode);
+BOOL   SetConsoleTitleA(LPCSTR title);
+#define _fseeki64(f, off, wh) fseeko((f), (off_t)(off), (wh))
+#define _ftelli64(f)          ((long long)ftello(f))
+int    _wcsicmp(const WCHAR *a, const WCHAR *b);
+
+/* INI files (the launcher's "SSX Tricky.ini"). */
+DWORD GetPrivateProfileStringA(LPCSTR section, LPCSTR key, LPCSTR def,
+                               LPSTR out, DWORD size, LPCSTR file);
+UINT  GetPrivateProfileIntA(LPCSTR section, LPCSTR key, INT def, LPCSTR file);
+BOOL  WritePrivateProfileStringA(LPCSTR section, LPCSTR key, LPCSTR value, LPCSTR file);
+
+/* winmm timer resolution: a no-op on POSIX (nanosleep is precise). */
+static inline MMRESULT timeBeginPeriod(UINT p) { (void)p; return TIMERR_NOERROR; }
+static inline MMRESULT timeEndPeriod(UINT p)   { (void)p; return TIMERR_NOERROR; }
+
+/* Window helpers the port touches outside the renderer. */
+HWND GetForegroundWindow(void);
+int  MessageBoxW(HWND hwnd, LPCWSTR text, LPCWSTR caption, UINT type);
+UINT MapVirtualKeyW(UINT code, UINT mapType);
+
 #ifdef __cplusplus
 }
 #endif

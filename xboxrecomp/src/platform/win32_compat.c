@@ -170,7 +170,7 @@ VOID WakeAllConditionVariable(PCONDITION_VARIABLE cv)
 /* ===================================================================== */
 
 typedef enum { K_EVENT, K_SEM, K_MUTEX, K_THREAD, K_TIMER, K_HEAP,
-               K_FILEMAP, K_FILE } w32_kind;
+               K_FILEMAP, K_FILE, K_WTIMER } w32_kind;
 
 #define W32_MAX_APC 16
 
@@ -213,6 +213,10 @@ typedef struct w32_object {
     DWORD           timer_period;
     WAITORTIMERCALLBACK timer_cb;
     PVOID           timer_param;
+
+    /* waitable timer: absolute CLOCK_MONOTONIC deadline in ns, 0 = unset */
+    uint64_t        wt_due_ns;
+    int             wt_manual;
 
     /* file mapping / fd-backed file handle */
     int             fd;
@@ -348,10 +352,40 @@ static int drain_apcs(void)
  * Wait on a single object. The object lock must NOT be held.
  * Returns WAIT_OBJECT_0 / WAIT_TIMEOUT.
  */
+static uint64_t mono_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+/* A waitable timer is waited on by sleeping to its deadline: precise to the
+ * scheduler, which is what the vblank and kernel-timer threads want. */
+static DWORD wait_wtimer(w32_object *o, DWORD ms)
+{
+    uint64_t limit = (ms == INFINITE) ? UINT64_MAX : mono_ns() + (uint64_t)ms * 1000000ull;
+    for (;;) {
+        uint64_t due = __atomic_load_n(&o->wt_due_ns, __ATOMIC_ACQUIRE);
+        uint64_t now = mono_ns();
+        if (due && now >= due) {
+            if (!o->wt_manual)
+                __atomic_compare_exchange_n(&o->wt_due_ns, &due, 0, 0,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+            return WAIT_OBJECT_0;
+        }
+        if (now >= limit) return WAIT_TIMEOUT;
+        uint64_t until = (due && due < limit) ? due : limit;
+        if (until - now > 50000000ull) until = now + 50000000ull;  /* re-check every 50 ms */
+        struct timespec ts = { (time_t)(until / 1000000000ull), (long)(until % 1000000000ull) };
+        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {}
+    }
+}
+
 static DWORD wait_single(w32_object *o, DWORD ms)
 {
     struct timespec ts;
     int timed = (ms != INFINITE);
+    if (o->kind == K_WTIMER) return wait_wtimer(o, ms);
     if (timed) deadline_from_ms(ms, &ts);
 
     pthread_mutex_lock(&o->lock);
@@ -1454,3 +1488,341 @@ PVOID AddVectoredExceptionHandler(ULONG First, PVECTORED_EXCEPTION_HANDLER Handl
 ULONG RemoveVectoredExceptionHandler(PVOID h) { (void)h; return 1; }
 
 #endif /* !_WIN32 */
+
+
+/* ===================================================================== */
+/* OpenTricky additions (see the matching block in win32_compat.h)       */
+/* ===================================================================== */
+#include <dlfcn.h>
+#include <unwind.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <ctype.h>
+
+/* ---- SRW locks --------------------------------------------------------- */
+VOID InitializeSRWLock(PSRWLOCK l)          { pthread_rwlock_init(&l->rw, NULL); }
+VOID AcquireSRWLockExclusive(PSRWLOCK l)    { pthread_rwlock_wrlock(&l->rw); }
+VOID ReleaseSRWLockExclusive(PSRWLOCK l)    { pthread_rwlock_unlock(&l->rw); }
+VOID AcquireSRWLockShared(PSRWLOCK l)       { pthread_rwlock_rdlock(&l->rw); }
+VOID ReleaseSRWLockShared(PSRWLOCK l)       { pthread_rwlock_unlock(&l->rw); }
+BOOLEAN TryAcquireSRWLockExclusive(PSRWLOCK l) { return pthread_rwlock_trywrlock(&l->rw) == 0; }
+
+/* ---- Atomics ----------------------------------------------------------- */
+PVOID InterlockedExchangePointer(PVOID volatile *p, PVOID v)
+{ return __atomic_exchange_n(p, v, __ATOMIC_SEQ_CST); }
+LONGLONG InterlockedExchange64(volatile LONGLONG *p, LONGLONG v)
+{ return __atomic_exchange_n(p, v, __ATOMIC_SEQ_CST); }
+LONGLONG InterlockedExchangeAdd64(volatile LONGLONG *p, LONGLONG v)
+{ return __atomic_fetch_add(p, v, __ATOMIC_SEQ_CST); }
+LONGLONG InterlockedCompareExchange64(volatile LONGLONG *p, LONGLONG x, LONGLONG c)
+{ __atomic_compare_exchange_n(p, &c, x, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return c; }
+LONG InterlockedOr(volatile LONG *p, LONG v)  { return __atomic_fetch_or(p, v, __ATOMIC_SEQ_CST); }
+LONG InterlockedAnd(volatile LONG *p, LONG v) { return __atomic_fetch_and(p, v, __ATOMIC_SEQ_CST); }
+
+/* ---- Waitable timers --------------------------------------------------- */
+HANDLE CreateWaitableTimerExW(LPSECURITY_ATTRIBUTES sa, LPCWSTR name, DWORD flags, DWORD access)
+{
+    (void)sa; (void)name; (void)access;
+    w32_object *o = obj_alloc(K_WTIMER);
+    o->wt_manual = (flags & 0x1u) ? 1 : 0;   /* CREATE_WAITABLE_TIMER_MANUAL_RESET */
+    return (HANDLE)o;
+}
+HANDLE CreateWaitableTimerW(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, LPCWSTR name)
+{
+    return CreateWaitableTimerExW(sa, name, manualReset ? 1u : 0u, TIMER_ALL_ACCESS);
+}
+BOOL SetWaitableTimer(HANDLE h, const LARGE_INTEGER *due, LONG period,
+                      PVOID completion, PVOID arg, BOOL resume)
+{
+    w32_object *o = (w32_object *)h;
+    (void)period; (void)completion; (void)arg; (void)resume;
+    if (!o || o->kind != K_WTIMER || !due) return FALSE;
+    uint64_t at;
+    if (due->QuadPart < 0) {
+        at = mono_ns() + (uint64_t)(-due->QuadPart) * 100ull;   /* relative, 100 ns units */
+    } else {
+        /* Absolute FILETIME: convert through the wall clock. */
+        FILETIME ft; GetSystemTimeAsFileTime(&ft);
+        int64_t nowft = (int64_t)(((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime);
+        int64_t d = due->QuadPart - nowft;
+        at = mono_ns() + (d > 0 ? (uint64_t)d * 100ull : 0);
+    }
+    if (at == 0) at = 1;
+    __atomic_store_n(&o->wt_due_ns, at, __ATOMIC_RELEASE);
+    return TRUE;
+}
+BOOL CancelWaitableTimer(HANDLE h)
+{
+    w32_object *o = (w32_object *)h;
+    if (!o || o->kind != K_WTIMER) return FALSE;
+    __atomic_store_n(&o->wt_due_ns, 0, __ATOMIC_RELEASE);
+    return TRUE;
+}
+
+/* ---- Diagnostics ------------------------------------------------------- */
+struct bt_state { PVOID *frames; ULONG skip, count, n; };
+static _Unwind_Reason_Code bt_step(struct _Unwind_Context *ctx, void *arg)
+{
+    struct bt_state *st = (struct bt_state *)arg;
+    uintptr_t ip = _Unwind_GetIP(ctx);
+    if (!ip) return _URC_END_OF_STACK;
+    if (st->skip) { st->skip--; return _URC_NO_REASON; }
+    if (st->n >= st->count) return _URC_END_OF_STACK;
+    st->frames[st->n++] = (PVOID)ip;
+    return _URC_NO_REASON;
+}
+USHORT CaptureStackBackTrace(ULONG skip, ULONG count, PVOID *frames, PULONG hash)
+{
+    struct bt_state st = { frames, skip + 1, count, 0 };
+    if (!frames || !count) return 0;
+    _Unwind_Backtrace(bt_step, &st);
+    if (hash) {
+        ULONG h = 0;
+        for (ULONG i = 0; i < st.n; i++) h += (ULONG)(uintptr_t)frames[i];
+        *hash = h;
+    }
+    return (USHORT)st.n;
+}
+
+/* The "module handle" is the load base of the image holding this code (the
+ * executable, or libmain.so on Android): what the crash reporter subtracts to
+ * turn addresses into offsets addr2line understands. */
+static HMODULE self_base(void)
+{
+    Dl_info di;
+    if (dladdr((void *)&self_base, &di) && di.dli_fbase) return (HMODULE)di.dli_fbase;
+    return NULL;
+}
+HMODULE GetModuleHandleA(LPCSTR name)  { return name ? NULL : self_base(); }
+HMODULE GetModuleHandleW(LPCWSTR name) { return name ? NULL : self_base(); }
+
+DWORD GetModuleFileNameA(HMODULE mod, LPSTR buf, DWORD size)
+{
+    (void)mod;
+    if (!buf || !size) return 0;
+    ssize_t n = -1;
+#if defined(__linux__) && !defined(__ANDROID__)
+    n = readlink("/proc/self/exe", buf, size - 1);
+#else
+    Dl_info di;
+    if (dladdr((void *)&self_base, &di) && di.dli_fname) {
+        n = (ssize_t)strlen(di.dli_fname);
+        if ((DWORD)n >= size) n = (ssize_t)size - 1;
+        memcpy(buf, di.dli_fname, (size_t)n);
+    }
+#endif
+    if (n < 0) { buf[0] = 0; return 0; }
+    buf[n] = 0;
+    return (DWORD)n;
+}
+DWORD GetModuleFileNameW(HMODULE mod, LPWSTR buf, DWORD size)
+{
+    char tmp[4096];
+    DWORD n = GetModuleFileNameA(mod, tmp, sizeof tmp);
+    if (!buf || !size) return 0;
+    return (DWORD)MultiByteToWideChar(CP_UTF8, 0, tmp, (int)n + 1, buf, (int)size) - 1;
+}
+
+BOOL IsDebuggerPresent(void) { return FALSE; }
+VOID DebugBreak(void)        { raise(SIGTRAP); }
+BOOL HeapValidate(HANDLE heap, DWORD flags, LPCVOID mem) { (void)heap; (void)flags; (void)mem; return TRUE; }
+HLOCAL LocalFree(HLOCAL mem) { free(mem); return NULL; }
+
+/* ---- Files and paths --------------------------------------------------- */
+DWORD GetTempPathA(DWORD size, LPSTR buf)
+{
+    const char *t = getenv("TMPDIR");
+    if (!t || !*t) t = "/tmp";
+    size_t n = strlen(t);
+    if (!buf || size < n + 2) return (DWORD)(n + 2);
+    memcpy(buf, t, n);
+    if (n == 0 || buf[n - 1] != '/') buf[n++] = '/';
+    buf[n] = 0;
+    return (DWORD)n;
+}
+static void host_path(char *dst, size_t cap, const char *src)
+{
+    snprintf(dst, cap, "%s", src ? src : "");
+    xbox_path_normalize(dst);
+}
+BOOL CreateDirectoryA(LPCSTR path, LPSECURITY_ATTRIBUTES sa)
+{
+    char p[4096]; (void)sa;
+    host_path(p, sizeof p, path);
+    if (mkdir(p, 0755) == 0) return TRUE;
+    SetLastError(errno == EEXIST ? ERROR_ALREADY_EXISTS : ERROR_PATH_NOT_FOUND);
+    return FALSE;
+}
+DWORD GetFileAttributesA(LPCSTR path)
+{
+    char p[4096]; struct stat st;
+    host_path(p, sizeof p, path);
+    if (stat(p, &st) != 0) { SetLastError(ERROR_FILE_NOT_FOUND); return INVALID_FILE_ATTRIBUTES; }
+    if (S_ISDIR(st.st_mode)) return FILE_ATTRIBUTE_DIRECTORY;
+    return (st.st_mode & S_IWUSR) ? FILE_ATTRIBUTE_NORMAL : FILE_ATTRIBUTE_READONLY;
+}
+DWORD GetFullPathNameA(LPCSTR name, DWORD size, LPSTR buf, LPSTR *filePart)
+{
+    char p[4096], full[8192];
+    host_path(p, sizeof p, name);
+    if (p[0] == '/') snprintf(full, sizeof full, "%s", p);
+    else {
+        char cwd[2048];
+        if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0;
+        snprintf(full, sizeof full, "%s/%s", cwd, p);
+    }
+    size_t n = strlen(full);
+    if (!buf || size <= n) return (DWORD)(n + 1);
+    memcpy(buf, full, n + 1);
+    if (filePart) { char *sl = strrchr(buf, '/'); *filePart = sl ? sl + 1 : buf; }
+    return (DWORD)n;
+}
+BOOL DeleteFileA(LPCSTR path)
+{
+    char p[4096]; host_path(p, sizeof p, path);
+    return unlink(p) == 0;
+}
+BOOL MoveFileExA(LPCSTR from, LPCSTR to, DWORD flags)
+{
+    char a[4096], b[4096]; (void)flags;
+    host_path(a, sizeof a, from); host_path(b, sizeof b, to);
+    return rename(a, b) == 0;
+}
+DWORD GetFileType(HANDLE h)
+{
+    int fd = w32_handle_fd(h);
+    struct stat st;
+    if (fd < 0) {
+        if (h == (HANDLE)(intptr_t)1 || h == (HANDLE)(intptr_t)2) fd = (int)(intptr_t)h;
+        else return FILE_TYPE_UNKNOWN;
+    }
+    if (fstat(fd, &st) != 0) return FILE_TYPE_UNKNOWN;
+    if (S_ISCHR(st.st_mode)) return FILE_TYPE_CHAR;
+    if (S_ISFIFO(st.st_mode) || S_ISSOCK(st.st_mode)) return FILE_TYPE_PIPE;
+    return FILE_TYPE_DISK;
+}
+HANDLE GetStdHandle(DWORD which)
+{
+    if (which == STD_OUTPUT_HANDLE) return (HANDLE)(intptr_t)1;
+    if (which == STD_ERROR_HANDLE)  return (HANDLE)(intptr_t)2;
+    return (HANDLE)(intptr_t)0;
+}
+BOOL GetConsoleMode(HANDLE h, LPDWORD mode)
+{
+    if (mode) *mode = 0;
+    return isatty((int)(intptr_t)h) ? TRUE : FALSE;
+}
+BOOL SetConsoleTitleA(LPCSTR t) { (void)t; return TRUE; }
+
+int _wcsicmp(const WCHAR *a, const WCHAR *b)
+{
+    for (;; a++, b++) {
+        WCHAR x = *a, y = *b;
+        if (x < 128) x = (WCHAR)tolower(x);
+        if (y < 128) y = (WCHAR)tolower(y);
+        if (x != y || !x) return (int)x - (int)y;
+    }
+}
+
+/* ---- INI files ----------------------------------------------------------
+ * Same rules as the Win32 functions for what the launcher uses: sections and
+ * keys match case-insensitively, values are trimmed and may be quoted, ';'
+ * starts a comment line, a missing file or key yields the default. */
+static char *ini_trim(char *s)
+{
+    while (*s == ' ' || *s == '\t') s++;
+    char *e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) *--e = 0;
+    return s;
+}
+DWORD GetPrivateProfileStringA(LPCSTR section, LPCSTR key, LPCSTR def,
+                               LPSTR out, DWORD size, LPCSTR file)
+{
+    char p[4096], line[4096];
+    int in_sec = 0, found = 0;
+    if (!out || !size) return 0;
+    host_path(p, sizeof p, file);
+    FILE *f = (section && key) ? fopen(p, "r") : NULL;
+    if (f) {
+        while (fgets(line, sizeof line, f)) {
+            char *l = ini_trim(line);
+            if (*l == ';' || *l == '#' || !*l) continue;
+            if (*l == '[') {
+                char *e = strchr(l, ']');
+                if (e) *e = 0;
+                in_sec = (strcasecmp(ini_trim(l + 1), section) == 0);
+                continue;
+            }
+            if (!in_sec) continue;
+            char *eq = strchr(l, '=');
+            if (!eq) continue;
+            *eq = 0;
+            if (strcasecmp(ini_trim(l), key) != 0) continue;
+            char *v = ini_trim(eq + 1);
+            size_t n = strlen(v);
+            if (n >= 2 && v[0] == '"' && v[n - 1] == '"') { v[n - 1] = 0; v++; }
+            snprintf(out, size, "%s", v);
+            found = 1;
+            break;
+        }
+        fclose(f);
+    }
+    if (!found) snprintf(out, size, "%s", def ? def : "");
+    return (DWORD)strlen(out);
+}
+UINT GetPrivateProfileIntA(LPCSTR section, LPCSTR key, INT def, LPCSTR file)
+{
+    char buf[64];
+    GetPrivateProfileStringA(section, key, "", buf, sizeof buf, file);
+    if (!buf[0]) return (UINT)def;
+    return (UINT)strtol(buf, NULL, 0);
+}
+BOOL WritePrivateProfileStringA(LPCSTR section, LPCSTR key, LPCSTR value, LPCSTR file)
+{
+    char p[4096], tmp[4200], line[4096];
+    host_path(p, sizeof p, file);
+    snprintf(tmp, sizeof tmp, "%s.tmp", p);
+    FILE *in = fopen(p, "r"), *out = fopen(tmp, "w");
+    int in_sec = 0, sec_seen = 0, done = 0;
+    if (!out) { if (in) fclose(in); return FALSE; }
+    while (in && fgets(line, sizeof line, in)) {
+        char copy[4096];
+        snprintf(copy, sizeof copy, "%s", line);
+        char *l = ini_trim(copy);
+        if (*l == '[') {
+            if (in_sec && !done && key && value) { fprintf(out, "%s=%s\n", key, value); done = 1; }
+            char *e = strchr(l, ']'); if (e) *e = 0;
+            in_sec = (strcasecmp(ini_trim(l + 1), section) == 0);
+            if (in_sec) sec_seen = 1;
+        } else if (in_sec && key && *l != ';' && strchr(l, '=')) {
+            char *eq = strchr(l, '='); *eq = 0;
+            if (strcasecmp(ini_trim(l), key) == 0) {
+                if (value && !done) fprintf(out, "%s=%s\n", key, value);
+                done = 1;
+                continue;
+            }
+        }
+        if (in_sec && !key && *l != '[') continue;   /* NULL key deletes the section's keys */
+        fputs(line, out);
+        if (line[0] && line[strlen(line) - 1] != '\n') fputc('\n', out);
+    }
+    if (!done && key && value) {
+        if (!sec_seen) fprintf(out, "\n[%s]\n", section);
+        fprintf(out, "%s=%s\n", key, value);
+    }
+    if (in) fclose(in);
+    fclose(out);
+    return rename(tmp, p) == 0;
+}
+
+/* ---- Window helpers outside the renderer -------------------------------- */
+HWND GetForegroundWindow(void) { return NULL; }
+int MessageBoxW(HWND hwnd, LPCWSTR text, LPCWSTR caption, UINT type)
+{
+    char t[2048] = "", c[256] = "";
+    if (text)    WideCharToMultiByte(CP_UTF8, 0, text, -1, t, sizeof t, NULL, NULL);
+    if (caption) WideCharToMultiByte(CP_UTF8, 0, caption, -1, c, sizeof c, NULL, NULL);
+    return MessageBoxA(hwnd, t, c, type);
+}
+UINT MapVirtualKeyW(UINT code, UINT mapType) { (void)mapType; return code; }

@@ -238,6 +238,7 @@ static void rd_note_fn(RdFn *t, uint32_t va, uint32_t off)
         }
 }
 
+#ifdef _WIN32
 static LONG CALLBACK rd_veh(EXCEPTION_POINTERS *x)
 {
     DWORD code = x->ExceptionRecord->ExceptionCode;
@@ -269,6 +270,7 @@ static LONG CALLBACK rd_veh(EXCEPTION_POINTERS *x)
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
+#endif /* _WIN32: page-fault read tracing needs the Windows exception context */
 
 static int rd_arm(void)
 {
@@ -478,7 +480,11 @@ void ticktrace_init(void)
             e = getenv("XBOX_TICKTRACE_READS_PHASE");
             s_rd_tick = e && !strcmp(e, "tick");
             s_rd_on = s_rd_nr && s_rd_nw && s_rd_seen;
+#ifdef _WIN32
             if (s_rd_on) AddVectoredExceptionHandler(1, rd_veh);
+#else
+            s_rd_on = 0;
+#endif
             if (!s_rev) rev_build();
         }
     }

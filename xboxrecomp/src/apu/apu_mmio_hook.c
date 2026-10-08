@@ -397,4 +397,33 @@ bool apu_hook_handle_mmio(PCONTEXT ctx, uintptr_t fault_addr,
     return apu_decode_and_handle(ctx, mmio_offset, is_write);
 }
 
+#else /* POSIX: the aperture is trapped through posix_fault.c */
+
+#include "platform/posix_fault.h"
+
+#define APU_MMIO_BASE  0xFE800000u
+#define APU_MMIO_SIZE  0x00080000u  /* 512KB */
+
+static uint64_t apu_pf_read(void *ud, uint32_t off, unsigned size)
+{ (void)ud; return mcpx_apu_mmio_read(g_apu_state, off, size); }
+static void apu_pf_write(void *ud, uint32_t off, uint64_t val, unsigned size)
+{ (void)ud; mcpx_apu_mmio_write(g_apu_state, off, val, size); }
+
+bool apu_mmio_install(uint8_t *mem_base)
+{
+    if (!g_apu_state) {
+        g_apu_state = mcpx_apu_init_standalone(mem_base);
+        if (!g_apu_state) {
+            fprintf(stderr, "  [APU] init failed -- aperture left as plain RAM\n");
+            return false;
+        }
+    }
+    if (!pf_mmio_register(mem_base + APU_MMIO_BASE, APU_MMIO_SIZE, "APU",
+                          apu_pf_read, apu_pf_write, NULL))
+        return false;
+    fprintf(stderr, "  [APU] MCPX aperture trapped at Xbox VA 0x%08X (%u bytes)\n",
+            APU_MMIO_BASE, APU_MMIO_SIZE);
+    return true;
+}
+
 #endif /* _WIN32 */

@@ -8,9 +8,7 @@
  *   - hooks H1/H2/H3 ;
  *   - sink JOURNAL (bloc texte par frame, échantillonnage, plafond de taille).
  */
-#ifdef _WIN32
 #include <windows.h>
-#endif
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdint.h>
