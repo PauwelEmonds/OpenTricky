@@ -64,6 +64,7 @@ typedef struct LauncherConfig {
     int  save_backup;     /* XBOX_SAVE_BACKUP: 1 = a copy of the previous save is kept (default) */
     int  smooth_motion;   /* XBOX_FPS_INTERP: 1 = frames in between interpolated above 60 (default);
                            * a hidden setting, for troubleshooting */
+    int  ao;              /* XBOX_AO: ambient occlusion (the OpenGL ES renderer), hidden, default 0 */
 } LauncherConfig;
 
 /* The XBE entry point this executable was recompiled from. A disc image is

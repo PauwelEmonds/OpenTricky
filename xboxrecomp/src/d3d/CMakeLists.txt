@@ -29,6 +29,7 @@ else()
         gles/gles_vsh.c
         gles/gles_progcache.c
         gles/gles_psh_uber.c
+        gles/gles_post.c
     )
     if(NOT TARGET SDL2::SDL2)
         find_package(SDL2 REQUIRED)

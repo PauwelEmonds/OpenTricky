@@ -94,12 +94,37 @@ trimming first (`extract-xiso -r`); installing needs about twice the APK's
 size free for a moment. The result has your game in it: keep it to yourself.
 
 The sliders button at the top of the touch controls (or the phone's Back)
-opens the graphics options over the paused game: the frame rate, 60 (as on
-the Xbox) or the screen's own rate (120 on a 120 Hz phone), switched while
-playing, and a frame rate counter. Both are kept in `settings.ini`
-(`FrameRateLimit`, `ShowFrameRate`). The frame pacing hooks are installed on
-a screen above 60 Hz even at 60 so the switch needs no restart
-(`XBOX_FPS_CAP_LIVE=1`, set by the Android host).
+opens the graphics options over the paused game. Everything applies at once
+and is kept in `settings.ini`:
+
+| Option | Choices | `settings.ini` |
+|---|---|---|
+| Frame rate | 60 (as on the Xbox) or the screen's own rate (120 on a 120 Hz phone) | `FrameRateLimit` |
+| Show the frame rate | an "N FPS" counter at the top | `ShowFrameRate` |
+| Ambient occlusion | GTAO: soft contact shadows in creases and under the riders | `AmbientOcclusion` |
+| Edge smoothing | SMAA off / low / medium / high / ultra | `SmoothEdges` |
+| Multisampling | MSAA off / 2x / 4x / 8x (up to what the GPU has) | `Multisampling` |
+| Texture sharpness | anisotropic filtering off / 2x - 16x | `TextureFiltering` |
+
+The image options are off by default on a phone (the Xbox's own look). The
+frame pacing hooks are installed on a screen above 60 Hz even at 60, so the
+frame rate switches without a restart (`XBOX_FPS_CAP_LIVE=1`, set by the
+Android host).
+
+Ambient occlusion and SMAA (`xboxrecomp/src/d3d/gles/gles_post.c`) run at
+the end of the 3D of each image -- the FRAME_END pass marker, as the Windows
+post chain does -- so the HUD and the menus drawn after it stay sharp and
+undarkened. GTAO (the pass of WoodyRE's `gtao.c`, after Intel's XeGTAO) works
+at half resolution from the depth, with the camera the title built
+(`d3d8_NoteProjection`, from the projection hook of `port/src/aspect.c`), and
+is blurred and multiplied into the image at full resolution. SMAA is
+`smaa/SMAA.hlsl` compiled as GLSL ES 3.00 (`gles/gles_smaa_src.h`, made by
+`xboxrecomp/tools/smaa_glsl_embed.py`). Images drawn without markers (the
+loading thread's) get SMAA on the whole image at the present instead. On
+Linux the same options come from the environment: `XBOX_AO=1`,
+`XBOX_SMAA=1` (`XBOX_SMAA_PRESET`), `XBOX_MSAA=N`, `XBOX_ANISO=N`;
+`XBOX_AO_DEBUG=1` shows the occlusion alone, `=2` distance bands from the
+depth.
 
 Phones get the game's own 16:9 menus (the `Menus` setting, forced by
 `XBOX_WIDE_MENUS=16:9`); races fill the whole screen.

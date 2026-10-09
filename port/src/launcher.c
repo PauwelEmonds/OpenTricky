@@ -252,6 +252,7 @@ static void fork_defaults(LauncherConfig *c)
     c->fidelity = 1;
     c->save_backup = 1;                 /* XBOX_SAVE_BACKUP's default */
     c->smooth_motion = 1;               /* XBOX_FPS_INTERP's default */
+    c->ao = 0;
     c->fix_cullwind = c->fix_occlusion = c->fix_texpassthru = c->fix_gamma = 1;
     c->audio_queue = 8;
     c->audio_out = 0;                   /* auto */
@@ -326,6 +327,7 @@ static void fork_from_settings(LauncherConfig *c, const Settings *s)
     c->btn_icons = (i > 0 && (ICONS_PS2_READY || i != ICONS_PS2)) ? i : 0;
     c->save_backup   = settings_get_bool(s, S_SAVE_BACKUP);
     c->smooth_motion = settings_get_bool(s, S_SMOOTH_MOTION);
+    c->ao = settings_get_bool(s, S_AMBIENT_OCCLUSION);
 }
 
 /* A path setting from the LauncherConfig: kept as it is in the file (relative,
@@ -367,6 +369,7 @@ static void fork_to_settings(Settings *s, const LauncherConfig *c)
     settings_set(s, S_BUTTON_STYLE, k_icons_name[(c->btn_icons >= 0 && c->btn_icons < N_ICONS) ? c->btn_icons : 0]);
     settings_set(s, S_SAVE_BACKUP, c->save_backup ? "1" : "0");
     settings_set(s, S_SMOOTH_MOTION, c->smooth_motion ? "1" : "0");
+    settings_set(s, S_AMBIENT_OCCLUSION, c->ao ? "1" : "0");
 }
 
 /* XBOX_FORK_INI (test runs): the options of a settings.ini (settings.h);
@@ -449,6 +452,7 @@ void launcher_fork_apply(const LauncherConfig *cfg, const char *source)
     /* the save backup copy and the frames in between above 60 */
     fork_set(line, sizeof line, "XBOX_SAVE_BACKUP", cfg->save_backup ? "1" : "0", source);
     fork_set(line, sizeof line, "XBOX_FPS_INTERP", cfg->smooth_motion ? "1" : "0", source);
+    fork_set(line, sizeof line, "XBOX_AO", cfg->ao ? "1" : "0", source);
     /* Original = no hook. */
     fork_set(line, sizeof line, "XBOX_DRAW_DISTANCE",
              k_drawdist_name[(cfg->draw_dist >= 0 && cfg->draw_dist <= 2) ? cfg->draw_dist : 0], source);
@@ -492,7 +496,8 @@ static void config_from_settings(LauncherConfig *c, const Settings *s)
     if (!settings_get_resolution(s, S_RESOLUTION, &c->width, &c->height))
         auto_resolution(c->aspect, c->fullscreen, &c->width, &c->height);
     c->aniso = settings_get_int(s, S_TEX_FILTER);           /* "off" -> 0 */
-    c->msaa = 1;                                             /* MSAA is no longer offered */
+    c->msaa = settings_get_int(s, S_MULTISAMPLING);         /* "off" -> 0; not in the launcher (the Android options) */
+    if (c->msaa != 2 && c->msaa != 4 && c->msaa != 8) c->msaa = 1;
     c->show_fps = settings_get_bool(s, S_SHOW_FPS);
     c->log_file = settings_get_bool(s, S_LOG_FILE);
     i = settings_choice_index(s, S_LAUNCHER_SOUNDS);
@@ -527,6 +532,11 @@ static void config_to_settings(Settings *s, const LauncherConfig *c)
     else snprintf(v, sizeof v, "off");
     settings_set(s, S_TEX_FILTER, v);
     settings_set(s, S_SHOW_FPS, c->show_fps ? "1" : "0");
+    {
+        char m[8];
+        snprintf(m, sizeof m, "%d", c->msaa);
+        settings_set(s, S_MULTISAMPLING, c->msaa > 1 ? m : "off");
+    }
     settings_set(s, S_LOG_FILE, c->log_file ? "1" : "0");
     settings_set(s, S_LAUNCHER_SOUNDS, c->menu_sounds <= 0 ? "off" : c->menu_sounds == 1 ? "low" : "medium");
     settings_set(s, S_LAUNCHER_MUSIC, c->launcher_music ? "1" : "0");

@@ -18,9 +18,13 @@ import android.os.ParcelFileDescriptor;
 import android.system.Os;
 import android.util.Log;
 import android.util.TypedValue;
+import android.view.Gravity;
+import android.widget.ArrayAdapter;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
+import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
 
@@ -135,9 +139,12 @@ public class OpenTrickyActivity extends SDLActivity {
         super.onActivityResult(request, result, data);
     }
 
-    /** The options (the touch controls' options button, or Back): the frame rate, 60 or the screen's rate (hz), and the
-     *  frame rate counter. Blocks until closed: -1 cancelled, else the frame rate | 0x10000 with the counter on. */
-    public static int options(final int fps, final int hz, final boolean counter) {
+    /** The options (the touch controls' options button, or Back), over the paused game. `cur` packs the current values:
+     *  bit 0 the screen's rate (else 60 fps), bit 1 the frame rate counter, bits 2-3 multisampling (off, 2x, 4x, 8x),
+     *  bits 4-6 edge smoothing (off, low, medium, high, ultra), bits 7-9 texture sharpness (off, 2x, 4x, 8x, 16x),
+     *  bit 10 ambient occlusion; hz is the screen's rate. Blocks until closed: -1 cancelled, else the new values packed
+     *  the same way. */
+    public static int options(final int cur, final int hz) {
         final Activity a = (Activity) SDLActivity.getContext();
         if (a == null) return -1;
         final Object lock = new Object();
@@ -149,14 +156,9 @@ public class OpenTrickyActivity extends SDLActivity {
             final int pad = (int) (24 * dp);
             LinearLayout box = new LinearLayout(t);
             box.setOrientation(LinearLayout.VERTICAL);
-            box.setPadding(pad, (int) (8 * dp), pad, 0);
+            box.setPadding(pad, (int) (8 * dp), pad, (int) (8 * dp));
 
-            TextView head = new TextView(t);
-            head.setText("Frame rate");
-            head.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-            head.setAlpha(0.7f);
-            box.addView(head);
-
+            box.addView(heading(t, "Frame rate", 0));
             final RadioGroup rate = new RadioGroup(t);
             RadioButton r60 = new RadioButton(t);
             r60.setId(60);
@@ -168,20 +170,31 @@ public class OpenTrickyActivity extends SDLActivity {
                 rhz.setText(hz + " fps  –  smoother, the screen's own rate");
                 rate.addView(rhz);
             }
-            rate.check(fps > 61 && hz > 61 ? hz : 60);
+            rate.check((cur & 1) != 0 && hz > 61 ? hz : 60);
             box.addView(rate);
-
-            final Switch show = new Switch(t);
-            show.setText("Show the frame rate");
-            show.setChecked(counter);
-            show.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
-            show.setPadding(0, (int) (16 * dp), 0, (int) (8 * dp));
+            final Switch show = toggle(t, dp, "Show the frame rate", (cur & 2) != 0);
             box.addView(show);
 
+            box.addView(heading(t, "Image quality  –  off is the Xbox's own look", (int) (16 * dp)));
+            final Switch ao = toggle(t, dp, "Ambient occlusion  (soft shadows in corners and under the riders)",
+                                     (cur & 0x400) != 0);
+            box.addView(ao);
+            final Spinner smaa = choice(t, dp, box, "Edge smoothing (SMAA)",
+                                        new String[] { "Off", "Low", "Medium", "High", "Ultra" }, (cur >> 4) & 7);
+            final Spinner msaa = choice(t, dp, box, "Multisampling (MSAA)",
+                                        new String[] { "Off", "2x", "4x", "8x" }, (cur >> 2) & 3);
+            final Spinner aniso = choice(t, dp, box, "Texture sharpness",
+                                         new String[] { "Off (as on the Xbox)", "2x", "4x", "8x", "16x" }, (cur >> 7) & 7);
+
+            ScrollView scroll = new ScrollView(t);          // a landscape phone is not tall enough for all of it
+            scroll.addView(box);
             AlertDialog d = new AlertDialog.Builder(a, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle("Graphics")
-                .setView(box)
-                .setPositiveButton("Done", (x, w) -> answer(lock, r, rate.getCheckedRadioButtonId() | (show.isChecked() ? 0x10000 : 0)))
+                .setView(scroll)
+                .setPositiveButton("Done", (x, w) -> answer(lock, r,
+                    (rate.getCheckedRadioButtonId() > 61 ? 1 : 0) | (show.isChecked() ? 2 : 0)
+                    | (msaa.getSelectedItemPosition() << 2) | (smaa.getSelectedItemPosition() << 4)
+                    | (aniso.getSelectedItemPosition() << 7) | (ao.isChecked() ? 0x400 : 0)))
                 .setNegativeButton("Cancel", (x, w) -> answer(lock, r, -1))
                 .setOnCancelListener(x -> answer(lock, r, -1))
                 .create();
@@ -191,6 +204,47 @@ public class OpenTrickyActivity extends SDLActivity {
             while (r[0] == -2) try { lock.wait(); } catch (InterruptedException e) { return -1; }
         }
         return r[0];
+    }
+
+    private static TextView heading(android.content.Context t, String text, int top) {
+        TextView h = new TextView(t);
+        h.setText(text);
+        h.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        h.setAlpha(0.7f);
+        h.setPadding(0, top, 0, 0);
+        return h;
+    }
+
+    private static Switch toggle(android.content.Context t, float dp, String text, boolean on) {
+        Switch s = new Switch(t);
+        s.setText(text);
+        s.setChecked(on);
+        s.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        s.setPadding(0, (int) (12 * dp), 0, (int) (12 * dp));
+        return s;
+    }
+
+    /** A row: the label, then a drop-down of the choices. */
+    private static Spinner choice(android.content.Context t, float dp, LinearLayout box, String label, String[] items, int sel) {
+        LinearLayout row = new LinearLayout(t);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, (int) (4 * dp), 0, (int) (4 * dp));
+        TextView l = new TextView(t);
+        l.setText(label);
+        l.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        TypedValue c = new TypedValue();                // the switches' colour, not the dimmed secondary one
+        if (t.getTheme().resolveAttribute(android.R.attr.textColorPrimary, c, true))
+            l.setTextColor(c.resourceId != 0 ? t.getColorStateList(c.resourceId) : android.content.res.ColorStateList.valueOf(c.data));
+        row.addView(l, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Spinner s = new Spinner(t);
+        ArrayAdapter<String> ad = new ArrayAdapter<>(t, android.R.layout.simple_spinner_item, items);
+        ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        s.setAdapter(ad);
+        s.setSelection(sel >= 0 && sel < items.length ? sel : 0);
+        row.addView(s);
+        box.addView(row);
+        return s;
     }
 
     /** A message with up to three buttons over the game; 1 for b1, 0 for b2, -1 for b3. Blocks until one is pressed. */

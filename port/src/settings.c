@@ -59,6 +59,9 @@ static const SettingChoice k_vsync[] = {
 static const SettingChoice k_tex_filter[] = {
     { "off", "Off (as on Xbox)" }, { "2", "2x" }, { "4", "4x" }, { "8", "8x" }, { "16", "16x" },
 };
+static const SettingChoice k_msaa[] = {
+    { "off", "Off" }, { "2", "2x" }, { "4", "4x" }, { "8", "8x" },
+};
 /* Same order as XBOX_SMAA_PRESET's levels (0 = off). */
 static const SettingChoice k_smaa[] = {
     { "off", "Off" }, { "low", "Low" }, { "medium", "Medium" }, { "high", "High" }, { "ultra", "Ultra" },
@@ -183,7 +186,11 @@ static const SettingDef k_reg[SETTINGS_COUNT] = {
         CHOICE(k_tex_filter, "off"), "XBOX_ANISO", SETTING_PC, P("off", "off", "off") },
     [S_SMAA] = { "Graphics", "SmoothEdges", T_GRAPHICS, "EDGES AND SHADOWS", "Smooth edges (SMAA)",
         "Removes jagged outlines after drawing; menus and the HUD stay sharp.",
+#ifdef __ANDROID__      /* a phone's GPU: off until the player turns it on */
+        CHOICE(k_smaa, "off"), "XBOX_SMAA, XBOX_SMAA_PRESET", SETTING_PC, P("off", "high", "high") },
+#else
         CHOICE(k_smaa, "high"), "XBOX_SMAA, XBOX_SMAA_PRESET", SETTING_PC, P("off", "high", "high") },
+#endif
     [S_SOFT_SHADOWS] = { "Graphics", "SoftShadows", T_GRAPHICS, "EDGES AND SHADOWS", "Soft shadows",
         "The edges of the shadows fade over a few pixels; off = hard edges, as on the Xbox.",
         BOOL_("1"), "XBOX_SOFT_SHADOWS", SETTING_PC, P("0", "1", "0") },
@@ -312,6 +319,13 @@ static const SettingDef k_reg[SETTINGS_COUNT] = {
     [S_FIX_KICKWAIT] = { "Advanced", "FixKickWait", T_NONE, NULL, "No wait on the GPU flush",
         "1 = the game does not busy-wait on the GPU write-combine flush (default); 0 = the original port's wait.",
         BOOL_("1"), "XBOX_FIX_KICKWAIT", SETTING_HIDDEN, NOP },
+    /* ── hidden: the Android options (port/src/host_sdl.c), written only when changed ── */
+    [S_MULTISAMPLING] = { "Graphics", "Multisampling", T_NONE, NULL, "Multisampling (MSAA)",
+        "Smoother polygon edges by drawing several samples per pixel: off, 2x, 4x or 8x.",
+        CHOICE(k_msaa, "off"), NULL, SETTING_HIDDEN, NOP },
+    [S_AMBIENT_OCCLUSION] = { "Graphics", "AmbientOcclusion", T_NONE, NULL, "Ambient occlusion",
+        "1 = creases, corners and the ground under the riders get soft contact shadows (GTAO; OpenGL ES renderer).",
+        BOOL_("0"), "XBOX_AO", SETTING_HIDDEN, NOP },
 };
 
 const SettingDef *settings_registry(void) { return k_reg; }

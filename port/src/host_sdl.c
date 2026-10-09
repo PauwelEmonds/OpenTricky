@@ -30,6 +30,14 @@
 
 /* Renderer (xboxrecomp/src/d3d/gles). */
 void d3d8_SetHostPaused(int paused);
+void d3d8_SetMsaa(int n);
+int  d3d8_GetMsaa(void);
+void d3d8_SetSmaa(int preset);
+int  d3d8_GetSmaa(void);
+void d3d8_SetAnisotropy(int n);
+int  d3d8_GetAnisotropy(void);
+void d3d8_SetAo(int on);
+int  d3d8_GetAo(void);
 void d3d8_SetPresentOverlay(void (*fn)(int w, int h));
 
 /* On-screen controls (touch_sdl.c). */
@@ -130,33 +138,61 @@ static int host_message_box(const char *text, const char *caption, UINT type);
 
 #ifdef __ANDROID__
 /* OpenTrickyActivity.options: the graphics options over the paused game.
- * The frame rate switches at once (fps_cap_set), the counter too; both are
- * kept in settings.ini (FrameRateLimit, ShowFps). */
+ * Everything applies at once -- the frame rate (fps_cap_set), the counter,
+ * ambient occlusion and SMAA (gles_post.c), multisampling (the scene targets
+ * are made again between two frames), texture sharpness -- and is kept in
+ * settings.ini (FrameRateLimit, ShowFrameRate, AmbientOcclusion, SmoothEdges,
+ * Multisampling, TextureFiltering). The values travel packed in one int, as
+ * OpenTrickyActivity.options describes. */
+static const int k_msaa_n[4] = { 1, 2, 4, 8 }, k_aniso_n[5] = { 0, 2, 4, 8, 16 };
+
+static int index_of(const int *t, int n, int v)
+{
+    int i;
+    for (i = 0; i < n; i++) if (t[i] == v) return i;
+    return 0;
+}
+
 static void options_open(void)
 {
     JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
     jobject act = (jobject)SDL_AndroidGetActivity();
-    int hz = d3d8_monitor_hz(NULL), cur = fps_cap_current(), r = -1;
+    int hz = d3d8_monitor_hz(NULL), fps = fps_cap_current(), r = -1, cur;
     if (!env || !act) return;
+    cur = (fps > 61 ? 1 : 0) | (d3d8_GetShowFps() ? 2 : 0)
+        | (index_of(k_msaa_n, 4, d3d8_GetMsaa()) << 2) | ((d3d8_GetSmaa() & 7) << 4)
+        | (index_of(k_aniso_n, 5, d3d8_GetAnisotropy()) << 7) | (d3d8_GetAo() ? 0x400 : 0);
     jclass c = (*env)->GetObjectClass(env, act);
-    jmethodID m = (*env)->GetStaticMethodID(env, c, "options", "(IIZ)I");
+    jmethodID m = (*env)->GetStaticMethodID(env, c, "options", "(II)I");
     d3d8_SetHostPaused(1);
-    if (m) r = (*env)->CallStaticIntMethod(env, c, m, (jint)cur, (jint)hz, (jboolean)(d3d8_GetShowFps() ? JNI_TRUE : JNI_FALSE));
+    if (m) r = (*env)->CallStaticIntMethod(env, c, m, (jint)cur, (jint)hz);
     if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); r = -1; }
     (*env)->DeleteLocalRef(env, c);
     (*env)->DeleteLocalRef(env, act);
     d3d8_SetHostPaused(0);
     if (r >= 0) {
         LauncherConfig cfg;
-        int fps = r & 0xFFFF, counter = (r >> 16) & 1;
+        int want = (r & 1) ? hz : 60, counter = (r >> 1) & 1, msaa = k_msaa_n[(r >> 2) & 3];
+        int smaa = (r >> 4) & 7, aniso = (r >> 7) & 7, ao = (r >> 10) & 1;
+        if (smaa > 4) smaa = 0;
+        aniso = k_aniso_n[aniso <= 4 ? aniso : 0];
         d3d8_SetShowFps(counter);
-        if (!fps_cap_set(fps) && fps != cur)
+        d3d8_SetMsaa(msaa);
+        d3d8_SetSmaa(smaa);
+        d3d8_SetAnisotropy(aniso);
+        d3d8_SetAo(ao);
+        if (!fps_cap_set(want) && want != fps)
             host_message_box("The new frame rate applies from the next start.", "SSX Tricky", 0x40);
         launcher_config_load(&cfg);
-        cfg.fps_cap = fps > 61 ? -2 : 60;           /* -2: the screen's rate (FrameRateLimit=monitor) */
+        cfg.fps_cap = want > 61 ? -2 : 60;          /* -2: the screen's rate (FrameRateLimit=monitor) */
         cfg.show_fps = counter;
+        cfg.msaa = msaa;
+        cfg.smaa = smaa;
+        cfg.aniso = aniso;
+        cfg.ao = ao;
         if (!launcher_config_save(&cfg)) fprintf(stderr, "Could not save the options\n");
-        printf("Options:    frame rate %d, counter %s\n", fps, counter ? "on" : "off");
+        printf("Options:    frame rate %d, counter %s, AO %s, SMAA %d, MSAA %dx, textures %dx\n", want,
+               counter ? "on" : "off", ao ? "on" : "off", smaa, msaa, aniso);
     }
 }
 #endif
@@ -440,6 +476,7 @@ int host_run(int (*game_main)(void))
      * Races fill the screen either way (ScreenShape=auto). */
     setenv("XBOX_WIDE_MENUS", "16:9", 0);
     setenv("XBOX_FPS_CAP_LIVE", "1", 0);          /* the options switch 60 / 120 while playing */
+    setenv("XBOX_PASS_TAGS", "emit", 0);          /* the end of the 3D, where the options' AO / SMAA run */
     {   /* Android drops stdout and stderr: everything goes to the log in the
          * app's folder, replaced at each start, for bug reports. */
         char log[1100];

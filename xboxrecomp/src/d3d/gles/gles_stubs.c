@@ -1,24 +1,13 @@
 /*
  * OpenGL ES 3 renderer -- the Windows renderer's extras that are not ported
- * (yet): the post chain and SMAA (d3d8_post.c), soft shadows
- * (d3d8_softshadow.c) and the GPU timing profiler (d3d8_gpuprof.c). Off here,
- * which is also their default on Windows, so the image is the title's own.
+ * (yet): soft shadows (d3d8_softshadow.c) and the GPU timing profiler
+ * (d3d8_gpuprof.c). Off here, which is also their default on Windows, so the
+ * image is the title's own. (SMAA and the 3D / overlay split: gles_post.c.)
  * Plus the translator's pump switches that live in d3d8_nv2a.c there.
  */
 #include "gles_internal.h"
 #include "../d3d8_gpuprof.h"
 #include <stdlib.h>
-
-/* post chain */
-int  d3d8_post_split_wanted(void) { return 0; }
-void d3d8_PassPhaseChanged(int old_phase, int new_phase, unsigned tag)
-{ (void)old_phase; (void)new_phase; (void)tag; }
-void d3d8_SetPostProcess(int on) { (void)on; }
-int  d3d8_GetPostProcess(void) { return 0; }
-void d3d8_SetSmaa(int preset) { (void)preset; }
-int  d3d8_GetSmaa(void) { return 0; }
-void d3d8_SetPostSplit(int on) { (void)on; }
-int  d3d8_GetPostSplit(void) { return 0; }
 
 /* soft shadows: the title's own stencil shadow quad is drawn as on Xbox */
 int d3d8_SoftShadowOn(void) { return 0; }

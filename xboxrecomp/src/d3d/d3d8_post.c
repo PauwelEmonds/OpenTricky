@@ -61,6 +61,11 @@ int d3d8_post_enabled(void)
 
 void d3d8_SetPostProcess(int on) { config_read(); InterlockedExchange(&s_post_on, on ? 1 : 0); }
 int  d3d8_GetPostProcess(void)   { config_read(); return s_post_on == 1; }
+/* The camera of the view (port/src/aspect.c): only the OpenGL ES renderer's
+ * ambient occlusion uses it (gles/gles_post.c). */
+void d3d8_NoteProjection(float fov_y, float aspect, float zn, float zf)
+{ (void)fov_y; (void)aspect; (void)zn; (void)zf; }
+
 void d3d8_SetSmaa(int preset)    { config_read(); InterlockedExchange(&s_smaa, (preset >= 1 && preset <= 4) ? preset : 0); }
 int  d3d8_GetSmaa(void)          { config_read(); return (int)s_smaa; }
 void d3d8_SetPostSplit(int on)   { config_read(); InterlockedExchange(&s_split, on ? 1 : 0); }

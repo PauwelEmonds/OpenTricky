@@ -505,6 +505,7 @@ static void host_present_impl(void)
 {
     int dw = 0, dh = 0;
     char shot[1024];
+    GLuint shown;
     if (!g_device_ready) return;
     scene_resolve();
     prev_frame_update();
@@ -530,6 +531,7 @@ static void host_present_impl(void)
         }
     }
 
+    shown = gles_post_present(g_gl.scene_tex);
     SDL_GL_GetDrawableSize(s_window, &dw, &dh);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     if (dw > 0 && dh > 0) {
@@ -545,7 +547,7 @@ static void host_present_impl(void)
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
-        gles_blit(g_gl.scene_tex, (dw - rw) / 2, (dh - rh) / 2, rw, rh, 1, dac_lut_tex());
+        gles_blit(shown, (dw - rw) / 2, (dh - rh) / 2, rw, rh, 1, dac_lut_tex());
         if (s_overlay) { s_overlay(dw, dh); gles_invalidate_state(); }
     }
     wait_while_paused();

@@ -826,6 +826,13 @@ void   d3d8_SetPresentBoxShape(double shape);
  * (oPts) by this so they keep their size against the scene. */
 void   d3d8_SetPointZoom(float zoom);
 float  d3d8_PointZoom(void);
+/* The projection the title built last (port/src/aspect.c): vertical field of
+ * view (radians), aspect, near and far planes. The OpenGL ES renderer's
+ * ambient occlusion rebuilds positions from the depth with it. */
+void   d3d8_NoteProjection(float fov_y, float aspect, float zn, float zf);
+/* Ambient occlusion (GTAO) of the 3D: OpenGL ES renderer only (gles_post.c). */
+void   d3d8_SetAo(int on);
+int    d3d8_GetAo(void);
 
 /* NV2A CLEAR_SURFACE with its clear rectangle: x0..x1, y0..y1
  * inclusive, in the title's pixels. flags as dev_Clear (1 target, 2 z,

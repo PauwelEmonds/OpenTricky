@@ -18,6 +18,7 @@ void sub_00075DE0(void);    /* Camera_ComputeDesiredEye (thiscall, ret 0x10) */
 void sub_000759F0(void);    /* camera collision check (cdecl: eye*, pivot*, k) */
 void sub_00078DE0(void);    /* Camera_Update (thiscall, ret) */
 void d3d8_SetPointZoom(float zoom);     /* d3d8_xbox.h */
+void d3d8_NoteProjection(float fov_y, float aspect, float zn, float zf);   /* d3d8_xbox.h */
 
 int g_aspect_hook_on;
 int g_aspect_fov = ASPECT_FOV_NOSTRETCH;
@@ -168,6 +169,10 @@ void hook_fov_0017770D(void)
     } else if (g_aspect_hook_on && s_boxed) {
         d3d8_SetPointZoom(1.0f);            /* a 16:9 frame: the title's own sizes */
     }
+    /* The camera of the view, as built (after the narrowing above): the
+     * renderer's screen-space passes (ambient occlusion) rebuild positions
+     * from the depth with it. */
+    d3d8_NoteProjection(MEMF(g_esp + 8u), a, MEMF(g_esp + 16u), MEMF(g_esp + 20u));
     sub_0017770D();
 }
 

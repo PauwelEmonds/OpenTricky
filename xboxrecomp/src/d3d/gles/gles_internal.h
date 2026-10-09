@@ -122,6 +122,12 @@ HRESULT gles_draw_ffp(D3DPRIMITIVETYPE prim, UINT prim_count, const void *verts,
 void gles_blit(GLuint tex, int x, int y, int w, int h, int flip_v, GLuint lut);
 GLuint gles_compile_program(const char *vs, const char *fs, const char *tag);
 
+/* ---- screen-space passes (gles_post.c) --------------------------------- */
+
+/* The texture the present shows for scene_tex (SMAA of the whole image when
+ * the image skipped the end-of-3D passes); starts the next image. */
+GLuint gles_post_present(GLuint scene_tex);
+
 /* Window clip (d3d8_SetWindowClip) in title pixels. */
 extern int  g_gles_wclip_on;
 extern long g_gles_wclip[4];
