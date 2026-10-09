@@ -20,6 +20,7 @@
 #else
 #include <sys/stat.h>
 #include <errno.h>
+#include <unistd.h>     /* readlink */
 #define SEP '/'
 #endif
 
@@ -837,8 +838,18 @@ int settings_game_dir(char *out, size_t out_sz)
     if (slash) *slash = 0;
     return narrow(w, out, out_sz);
 #else
-    (void)out; (void)out_sz;
-    return 0;
+    /* Linux / Android: the data folder the host chose (host_sdl.c sets
+     * OT_DATA_DIR; Android's app folder), else the executable's folder. */
+    const char *e = getenv("OT_DATA_DIR");
+    char exe[4096], *slash;
+    ssize_t k;
+    if (e && e[0]) return snprintf(out, out_sz, "%s", e) < (int)out_sz;
+    k = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (k <= 0) return 0;
+    exe[k] = 0;
+    slash = strrchr(exe, '/');
+    if (slash) *slash = 0;
+    return snprintf(out, out_sz, "%s", exe) < (int)out_sz;
 #endif
 }
 

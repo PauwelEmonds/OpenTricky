@@ -2,9 +2,7 @@
  * np_racebench -- replayed race for benchmarks.
  * See np_racebench.h for the switch, the files and the limits.
  */
-#ifdef _WIN32
-#include <windows.h>
-#endif
+#include <windows.h>         /* on Linux / Android: the runtime's shim */
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>

@@ -1940,3 +1940,45 @@ int MessageBoxW(HWND hwnd, LPCWSTR text, LPCWSTR caption, UINT type)
     return MessageBoxA(hwnd, t, c, type);
 }
 UINT MapVirtualKeyW(UINT code, UINT mapType) { (void)mapType; return code; }
+
+void GetSystemInfo(LPSYSTEM_INFO si)
+{
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    memset(si, 0, sizeof *si);
+    si->dwPageSize = (DWORD)sysconf(_SC_PAGESIZE);
+    si->dwAllocationGranularity = 0x10000;
+    si->dwNumberOfProcessors = n > 0 ? (DWORD)n : 1;
+    si->dwActiveProcessorMask = n >= 64 ? ~(ULONG_PTR)0 : (((ULONG_PTR)1 << si->dwNumberOfProcessors) - 1);
+}
+
+/* The embedded files (ot_resources.c, made by port/cmake/EmbedResources.cmake),
+ * weak so a program without them still links: then no resource is found. */
+extern const OtResource g_ot_resources[] __attribute__((weak));
+extern const unsigned g_ot_resources_n __attribute__((weak));
+
+HRSRC FindResourceA(HMODULE mod, LPCSTR name, LPCSTR type)
+{
+    unsigned i;
+    (void)mod; (void)type;
+    if (!g_ot_resources || !&g_ot_resources_n || !name || (ULONG_PTR)name < 0x10000) return NULL;
+    for (i = 0; i < g_ot_resources_n; i++)
+        if (!strcmp(g_ot_resources[i].name, name)) return &g_ot_resources[i];
+    return NULL;
+}
+
+HGLOBAL LoadResource(HMODULE mod, HRSRC res) { (void)mod; return (HGLOBAL)res; }
+LPVOID  LockResource(HGLOBAL g) { return g ? (LPVOID)((const OtResource *)g)->data : NULL; }
+DWORD   SizeofResource(HMODULE mod, HRSRC res) { (void)mod; return res ? res->size : 0; }
+
+BOOL InitOnceExecuteOnce(PINIT_ONCE once, PINIT_ONCE_FN fn, PVOID param, LPVOID *context)
+{
+    static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
+    BOOL done;
+    if (__atomic_load_n(&once->state, __ATOMIC_ACQUIRE) == 2) return TRUE;
+    pthread_mutex_lock(&lk);
+    if (once->state != 2 && fn(once, param, context))
+        __atomic_store_n(&once->state, 2, __ATOMIC_RELEASE);
+    done = once->state == 2;
+    pthread_mutex_unlock(&lk);
+    return done;
+}

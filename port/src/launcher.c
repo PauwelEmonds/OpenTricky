@@ -9,8 +9,18 @@
  * that a disc image is the build this executable was recompiled from.
  */
 #include <windows.h>
+#ifdef _WIN32
 #include <shlobj.h>
 #include <shellapi.h>
+#define PS "\\"          /* path separator */
+#else
+/* Linux / Android: paths are UTF-8 as they are; the data folder, the display
+ * and showing a folder come from the host (host_sdl.c). */
+#include <dirent.h>
+#include <sys/stat.h>
+#include "host_sdl.h"
+#define PS "/"
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -24,7 +34,9 @@
 #include "version.h"
 #include "kernel/xbox_xdvdfs.h"
 
+#ifdef _WIN32
 static BOOL to_path(const WCHAR *w, char *out, size_t n);   /* below */
+#endif
 
 /* ── Settings file ─────────────────────────────────────────────────── */
 
@@ -66,14 +78,22 @@ static int res_list(int aspect, const Res **list)
     case LAUNCHER_ASPECT_329: *list = k_res329; return (int)(sizeof k_res329 / sizeof k_res329[0]);
     case LAUNCHER_ASPECT_AUTO: {
         static const int heights[] = { 2160, 1440, 1200, 1080, 720 };
-        DEVMODEW dm;
         int i, n = 0, mw = 1920, mh = 1080;
+#ifdef _WIN32
+        DEVMODEW dm;
         memset(&dm, 0, sizeof dm);
         dm.dmSize = sizeof dm;
         if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmPelsWidth >= 640 && dm.dmPelsHeight >= 480) {
             mw = (int)dm.dmPelsWidth;
             mh = (int)dm.dmPelsHeight;
         }
+#else
+        {
+            int dw = 0, dh = 0;
+            host_display_size(&dw, &dh);
+            if (dw >= 640 && dh >= 480) { mw = dw; mh = dh; }
+        }
+#endif
         {
             /* Test only: XBOX_MONITOR_SIZE=3440x1440 stands in for the monitor. */
             const char *e = getenv("XBOX_MONITOR_SIZE");
@@ -113,13 +133,29 @@ void launcher_init(uint32_t expected_entry_point)
 
 static void exe_dir(char *out, size_t n)
 {
+#ifdef _WIN32
     DWORD k = GetModuleFileNameA(NULL, out, (DWORD)n);
     char *slash;
     if (k == 0 || k >= n) { out[0] = '\0'; return; }
     slash = strrchr(out, '\\');
     if (slash) *slash = '\0';
+#else
+    snprintf(out, n, "%s", host_data_dir());    /* beside the executable; Android's app folder */
+#endif
 }
 
+#ifndef _WIN32
+static BOOL u8_to_path(const char *u8, char *out, size_t n)
+{
+    snprintf(out, n, "%s", u8);
+    return TRUE;
+}
+
+static void path_to_u8(const char *ansi, char *out, size_t n)
+{
+    snprintf(out, n, "%s", ansi);
+}
+#else
 /* UTF-8 (settings.ini) <-> the ANSI paths the runtime opens. A path outside
  * the code page becomes its short 8.3 form, or empty if it has none. */
 static BOOL u8_to_path(const char *u8, char *out, size_t n)
@@ -139,6 +175,7 @@ static void path_to_u8(const char *ansi, char *out, size_t n)
     if (ansi[0] && MultiByteToWideChar(CP_ACP, 0, ansi, -1, w, MAX_PATH))
         WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)n, NULL, NULL);
 }
+#endif
 
 /* settings.ini (settings.h, settings_locate): beside the executables, or in
  * Documents\My Games\SSX Tricky when only that one exists. */
@@ -164,8 +201,18 @@ static void default_resolution(int aspect, int *w, int *h)
     RECT work, frame = { 0, 0, 0, 0 };
     int i, best = 0;
 
+#ifdef _WIN32
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     AdjustWindowRect(&frame, WS_OVERLAPPEDWINDOW, FALSE);
+#else
+    {
+        int dw = 1920, dh = 1080;
+        host_display_size(&dw, &dh);
+        work.left = work.top = 0;
+        work.right = dw;
+        work.bottom = dh;
+    }
+#endif
     for (i = 0; i < n; i++) {
         if (list[i].w + (frame.right - frame.left) <= work.right - work.left &&
             list[i].h + (frame.bottom - frame.top) <= work.bottom - work.top)
@@ -355,7 +402,11 @@ static void fork_set(char *line, size_t n, const char *name, const char *value,
         snprintf(line + len, n - len, " %s=- (default)", name);
         return;
     }
+#ifdef _WIN32
     _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
     snprintf(line + len, n - len, " %s=%s (%s)", name, value, source);
 }
 
@@ -490,9 +541,14 @@ void launcher_log_path(char *out, size_t out_sz)
     char ini[MAX_PATH], exe[MAX_PATH], *slash, *name, *dot;
     DWORD k;
     launcher_config_path(ini, sizeof ini);
-    slash = strrchr(ini, '\\');
+    slash = strrchr(ini, PS[0]);
     if (slash) slash[1] = '\0';
     else ini[0] = '\0';
+#ifndef _WIN32
+    (void)exe; (void)k; (void)name; (void)dot;
+    snprintf(out, out_sz, "%sSSX Tricky.log", ini);
+    return;
+#endif
     k = GetModuleFileNameA(NULL, exe, (DWORD)sizeof exe);
     if (k == 0 || k >= sizeof exe) snprintf(exe, sizeof exe, "SSX Tricky.exe");
     name = strrchr(exe, '\\');
@@ -505,6 +561,16 @@ void launcher_log_path(char *out, size_t out_sz)
 /* A folder with something in it (the saves of an earlier version). */
 static BOOL folder_has_files(const char *dir)
 {
+#ifndef _WIN32
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    BOOL any = FALSE;
+    if (!d) return FALSE;
+    while (!any && (e = readdir(d)) != NULL)
+        if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) any = TRUE;
+    closedir(d);
+    return any;
+#else
     char pat[MAX_PATH + 4];
     WIN32_FIND_DATAA fd;
     HANDLE h;
@@ -517,6 +583,7 @@ static BOOL folder_has_files(const char *dir)
     } while (!any && FindNextFileA(h, &fd));
     FindClose(h);
     return any;
+#endif
 }
 
 /* Documents\My Games\SSX Tricky\Saves, created if missing. The
@@ -524,6 +591,10 @@ static BOOL folder_has_files(const char *dir)
  * if it cannot be had as a path the game's ANSI file calls can open. */
 static BOOL documents_saves(char *out, size_t out_sz)
 {
+#ifndef _WIN32
+    (void)out; (void)out_sz;
+    return FALSE;           /* the saves stay in the data folder */
+#else
     PWSTR docs = NULL;
     WCHAR w[MAX_PATH], sh[MAX_PATH];
     BOOL lossy = FALSE, ok = FALSE;
@@ -538,6 +609,7 @@ static BOOL documents_saves(char *out, size_t out_sz)
              WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, sh, -1, out, (int)out_sz, NULL, &lossy) && !lossy)
         ok = TRUE;
     return ok;
+#endif
 }
 
 /* Where the saves go. A SaveFolder set in the .ini (chosen in
@@ -554,9 +626,9 @@ int launcher_save_kind(const LauncherConfig *cfg)
     char base[MAX_PATH], p[MAX_PATH + 16], d[MAX_PATH];
     if (cfg->hdd[0]) return LAUNCHER_SAVES_CHOSEN;
     exe_dir(base, sizeof base);
-    snprintf(p, sizeof p, "%s\\hdd", base);
+    snprintf(p, sizeof p, "%s" PS "hdd", base);
     if (folder_has_files(p)) return LAUNCHER_SAVES_OLD_HDD;
-    snprintf(p, sizeof p, "%s\\portable.txt", base);
+    snprintf(p, sizeof p, "%s" PS "portable.txt", base);
     if (GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES) return LAUNCHER_SAVES_PORTABLE;
     if (documents_saves(d, sizeof d)) return LAUNCHER_SAVES_DOCUMENTS;
     return LAUNCHER_SAVES_PORTABLE;
@@ -568,12 +640,16 @@ void launcher_hdd_path(const LauncherConfig *cfg, char *out, size_t out_sz)
     const char *p = kind == LAUNCHER_SAVES_CHOSEN ? cfg->hdd : kind == LAUNCHER_SAVES_OLD_HDD ? "hdd" : "Saves";
     char joined[MAX_PATH * 2];
     if (kind == LAUNCHER_SAVES_DOCUMENTS && documents_saves(out, out_sz)) return;
+#ifdef _WIN32
     if ((p[0] && p[1] == ':') || (p[0] == '\\' && p[1] == '\\')) {
+#else
+    if (p[0] == '/') {
+#endif
         snprintf(joined, sizeof joined, "%s", p);
     } else {
         char base[MAX_PATH];
         exe_dir(base, sizeof base);
-        snprintf(joined, sizeof joined, "%s\\%s", base, p);
+        snprintf(joined, sizeof joined, "%s" PS "%s", base, p);
     }
     if (!GetFullPathNameA(joined, (DWORD)out_sz, out, NULL))
         snprintf(out, out_sz, "%s", joined);
@@ -581,6 +657,11 @@ void launcher_hdd_path(const LauncherConfig *cfg, char *out, size_t out_sz)
 
 void launcher_open_path(HWND owner, const char *path, BOOL folder)
 {
+#ifndef _WIN32
+    (void)owner;
+    if (folder) mkdir(path, 0755);
+    host_open_path(path, folder);
+#else
     WCHAR w[MAX_PATH];
     if (folder) CreateDirectoryA(path, NULL);
     if (!MultiByteToWideChar(CP_ACP, 0, path, -1, w, MAX_PATH)) return;
@@ -589,6 +670,7 @@ void launcher_open_path(HWND owner, const char *path, BOOL folder)
         swprintf(msg, MAX_PATH + 64, L"Could not open:\n%ls", w);
         MessageBoxW(owner, msg, L"SSX Tricky", MB_ICONWARNING);
     }
+#endif
 }
 
 /* settings.ini as read at start (settings_load), for launcher_config_save:
@@ -646,7 +728,8 @@ BOOL launcher_check_iso(const char *path, char *why, size_t why_sz)
         snprintf(why, why_sz, "No disc image has been chosen.");
         return FALSE;
     }
-    fa = GetFileAttributesA(path);
+    /* "fd:N": a descriptor the Android host opened (the system's file picker). */
+    fa = strncmp(path, "fd:", 3) ? GetFileAttributesA(path) : FILE_ATTRIBUTE_NORMAL;
     if (fa == INVALID_FILE_ATTRIBUTES || (fa & FILE_ATTRIBUTE_DIRECTORY)) {
         snprintf(why, why_sz, "Your disc image was moved or deleted: %s", path);
         return FALSE;
@@ -706,18 +789,23 @@ typedef UINT (WINAPI *GetDpiForWindowFn)(HWND);
 
 void launcher_enable_dpi_awareness(void)
 {
+#ifndef _WIN32
+}
+#else
     HMODULE u = GetModuleHandleW(L"user32.dll");
     SetDpiCtxFn set = u ? (SetDpiCtxFn)(void *)GetProcAddress(u, "SetProcessDpiAwarenessContext") : NULL;
     /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4 */
     if (!set || !set((HANDLE)(INT_PTR)-4))
         SetProcessDPIAware();
 }
+#endif
 
 /* ── Path helpers ──────────────────────────────────────────────────── */
 
 /* The runtime opens files through the ANSI API, so a path must survive the
  * conversion. If it does not (characters outside the code page), the short
  * 8.3 form usually does; failing that the path is refused. */
+#ifdef _WIN32
 static BOOL to_path(const WCHAR *w, char *out, size_t n)
 {
     BOOL lossy = FALSE;
@@ -733,3 +821,4 @@ static BOOL to_path(const WCHAR *w, char *out, size_t n)
     }
     return TRUE;
 }
+#endif

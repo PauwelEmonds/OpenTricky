@@ -14,10 +14,14 @@ serves both: the Android app is the Linux build packaged as `libmain.so`.
 | Sound | XAudio2 | SDL audio (`apu_xaudio2.c`) |
 | APU / AC'97 / DAC registers | page faults + x86-64 decoder (VEH) | page faults + x86-64 / AArch64 decoder (`platform/posix_fault.c`) |
 | Win32 calls of the runtime | Windows | `platform/win32_compat.c` and `platform/posix/windows.h` |
-| Launcher | the launcher window | settings in `SSX Tricky.ini`; Android asks for the disc image |
+| Launcher | OpenTricky.exe writes `settings.ini` | `settings.ini` by hand; Android asks for the disc image |
 
 Not ported yet (all off by default on Windows too): the post chain and SMAA,
-soft shadows, the GPU profiler. Vertex programs run on the GPU as on Windows,
+soft shadows, the GPU profiler. Windows-only from 0.1.1: the launcher
+(OpenTricky.exe) and the crash reports with minidumps (a crash is written to
+the log instead); online play (`XBOX_NET`) builds on BSD sockets but is
+untested. The HD textures and the button icons work (the .rc's files are
+compiled in by `port/cmake/EmbedResources.cmake`, PNGs decoded with zlib). Vertex programs run on the GPU as on Windows,
 as GLSL (`gles/gles_vsh.c`, the HLSL generator's rules). Point sprites too:
 ES 3.0 has no geometry shader, so each point is an instance of six vertices
 whose shader builds the square (`XBOX_FIX_POINTS_GPU=0` expands them on the
@@ -51,8 +55,9 @@ cmake --build build-linux
 "build-linux/SSX Tricky" --direct "/path/to/SSX Tricky (USA).iso"
 ```
 
-Without `--direct` the game uses `SSX Tricky.ini` beside the executable
-(written the first time; set `DiscImage=` in `[Game]`). `OT_TOUCH=1` shows
+Without `--direct` the game reads `settings.ini` beside the executable (or in
+`OT_DATA_DIR`); the first start without a usable disc image writes it with
+the defaults: set `DiscImage =` in `[Game]`. `OT_TOUCH=1` shows
 the touch controls, driven with the mouse.
 
 ## Building for Android
@@ -79,8 +84,8 @@ appear at the first touch.
 
 Files (settings, saves, log, screenshots) are in the app's folder,
 `Android/data/io.github.opentricky.ssxtricky/files/`, which a USB cable
-reaches. `SSX Tricky.ini` there takes the same settings as on Windows
-(`Resolution`, `AntiAliasing`, ...).
+reaches. `settings.ini` there takes the same settings as on Windows (the file
+OpenTricky.exe writes; copy one over, or edit it).
 
 Testing from a PC:
 

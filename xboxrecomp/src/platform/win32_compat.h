@@ -712,6 +712,41 @@ HWND GetForegroundWindow(void);
 int  MessageBoxW(HWND hwnd, LPCWSTR text, LPCWSTR caption, UINT type);
 UINT MapVirtualKeyW(UINT code, UINT mapType);
 
+/* CRT and system queries 0.1.1's code makes. */
+#define _snwprintf swprintf
+typedef struct {
+    WORD  wProcessorArchitecture, wReserved;
+    DWORD dwPageSize;
+    LPVOID lpMinimumApplicationAddress, lpMaximumApplicationAddress;
+    ULONG_PTR dwActiveProcessorMask;
+    DWORD dwNumberOfProcessors, dwProcessorType, dwAllocationGranularity;
+    WORD  wProcessorLevel, wProcessorRevision;
+} SYSTEM_INFO, *LPSYSTEM_INFO;
+void GetSystemInfo(LPSYSTEM_INFO si);
+
+/* One-time initialisation (InitOnceExecuteOnce). */
+typedef struct { volatile LONG state; } INIT_ONCE, *PINIT_ONCE;    /* 0 to do, 2 done */
+#define INIT_ONCE_STATIC_INIT { 0 }
+typedef BOOL (*PINIT_ONCE_FN)(PINIT_ONCE once, PVOID param, PVOID *context);
+BOOL InitOnceExecuteOnce(PINIT_ONCE once, PINIT_ONCE_FN fn, PVOID param, LPVOID *context);
+
+/* RCDATA resources: on Linux / Android the files the Windows .rc embeds are
+ * compiled into a table (port/cmake/EmbedResources.cmake, OtResource below)
+ * that these read, by name. */
+typedef struct OtResource { const char *name; const unsigned char *data; unsigned size; } OtResource;
+typedef const OtResource *HRSRC;
+typedef void *HGLOBAL;
+#ifndef MAKEINTRESOURCEA
+#define MAKEINTRESOURCEA(i) ((LPSTR)(ULONG_PTR)(WORD)(i))
+#endif
+#ifndef RT_RCDATA
+#define RT_RCDATA MAKEINTRESOURCEA(10)
+#endif
+HRSRC   FindResourceA(HMODULE mod, LPCSTR name, LPCSTR type);
+HGLOBAL LoadResource(HMODULE mod, HRSRC res);
+LPVOID  LockResource(HGLOBAL g);
+DWORD   SizeofResource(HMODULE mod, HRSRC res);
+
 #ifdef __cplusplus
 }
 #endif

@@ -2,8 +2,24 @@
  * np_net -- online multiplayer, step 5: two instances over UDP.
  * See np_net.h for the switch, the course of a race, the transport and the limits.
  */
+#ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+/* Linux / Android: BSD sockets under Winsock's names. */
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <errno.h>
+typedef int SOCKET;
+#define INVALID_SOCKET (-1)
+#define closesocket close
+#define WSAGetLastError() errno
+typedef struct { int unused; } WSADATA;
+static int WSAStartup(unsigned short v, WSADATA *d) { (void)v; (void)d; return 0; }
+#endif
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -273,9 +289,15 @@ static DWORD WINAPI nn_thread(LPVOID unused)
         struct timeval tv = { 0, 50000 };
         double now;
         FD_ZERO(&rs); FD_SET(s_sock, &rs);
-        if (select(0, &rs, 0, 0, &tv) > 0) {
+        /* nfds: ignored by Winsock, the highest descriptor + 1 elsewhere */
+        if (select((int)s_sock + 1, &rs, 0, 0, &tv) > 0) {
             struct sockaddr_in from;
-            int fl = sizeof from, n, rlen;
+#ifdef _WIN32
+            int fl = sizeof from;
+#else
+            socklen_t fl = sizeof from;
+#endif
+            int n, rlen;
             n = recvfrom(s_sock, (char *)buf, sizeof buf, 0, (struct sockaddr *)&from, &fl);
             if (n > 0) {
                 EnterCriticalSection(&s_lk);

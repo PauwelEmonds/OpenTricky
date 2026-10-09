@@ -48,6 +48,7 @@ void crashreport_set_output(int player, const char *log_path, int output_redirec
  * watchdog (and the XBOX_CRASH_TEST thread, when set). */
 void crashreport_game_start(void);
 
+#ifdef _WIN32    /* the crash itself: the Windows exception handler (main.c) */
 /* From the unhandled exception filter, on the faulting thread. details is a
  * short text block (guest registers...) added to report.txt. Returns 1 and
  * the folder (for the message) when a report was written. */
@@ -65,5 +66,7 @@ void crashreport_crash_dialog(DWORD code, const wchar_t *dir);
 
 /* Opens a report folder in Explorer. */
 void crashreport_open_folder(const wchar_t *dir);
+
+#endif
 
 #endif

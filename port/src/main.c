@@ -45,6 +45,7 @@
 #ifndef _WIN32
 #include <SDL.h>                     /* SDL_main on Android */
 #include "platform/posix_fault.h"
+#include "host_sdl.h"                /* the disc-image picker, host_run */
 #endif
 
 /* xboxrecomp runtime headers */
@@ -270,6 +271,7 @@ static BOOL has_flag(const WCHAR *flag)
  * image moved): start the launcher, OpenTricky.exe beside this executable,
  * where the player chooses one; without it, say what is missing.
  */
+#ifdef _WIN32
 static void open_launcher_instead(const char *why)
 {
     WCHAR exe[MAX_PATH], *slash;
@@ -296,6 +298,7 @@ static void open_launcher_instead(const char *why)
         MessageBoxA(NULL, msg, "SSX Tricky", MB_ICONWARNING);
     }
 }
+#endif
 
 /*
  * TRUE when standard output goes somewhere other than a person: a pipe, a
@@ -883,6 +886,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
         if (use_config) {
             char why[512];
+#ifndef _WIN32
+            /* No OpenTricky.exe here: the host asks (Android's file picker,
+             * again after an image that does not work), or says what to set
+             * in settings.ini (Linux). */
+            while (!launcher_check_iso(launch_cfg.iso, why, sizeof why) ||
+                   !xdvdfs_mount(launch_cfg.iso)) {
+                if (launch_cfg.iso[0]) printf("Disc image %s: %s\n", launch_cfg.iso, why);
+                if (!host_launcher_run(&launch_cfg)) return 0;
+            }
+#else
             if (!launcher_check_iso(launch_cfg.iso, why, sizeof why)) {
                 open_launcher_instead(why);
                 return 0;
@@ -891,6 +904,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                 open_launcher_instead("The disc image could not be opened.");
                 return 0;
             }
+#endif
             printf("Game disc: %s (ISO)\n", launch_cfg.iso);
         } else {
             char iso_path[MAX_PATH];

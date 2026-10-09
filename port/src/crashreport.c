@@ -33,6 +33,18 @@
  *   seconds between two samples restarts the count (debugger, a diagnostic
  *   that suspended the threads), and nothing fires under a debugger.
  */
+#ifndef _WIN32
+/* Linux / Android: no minidumps or report folders (a crash is reported in
+ * the log by posix_crash_report, main.c); the calls the game makes on every
+ * platform do nothing. */
+#include "crashreport.h"
+void crashreport_install(void) {}
+void crashreport_set_output(int player, const char *log_path, int output_redirected)
+{
+    (void)player; (void)log_path; (void)output_redirected;
+}
+void crashreport_game_start(void) {}
+#else
 #include "crashreport.h"
 #include "launcher.h"
 #include "version.h"
@@ -868,3 +880,4 @@ void crashreport_open_folder(const wchar_t *dir)
     if (dir && dir[0])
         ShellExecuteW(NULL, L"open", dir, NULL, NULL, SW_SHOWNORMAL);
 }
+#endif /* _WIN32 */

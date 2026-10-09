@@ -80,6 +80,8 @@ else()
     configure_file("${SSX_ICON_FALLBACK}" "${SSX_APP_ICON}" COPYONLY)
 endif()
 set(SSX_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/src/ssx_recomp.manifest")
+endif()
+
 # HD texture index (port/tools/hdtex_index.py), built into the exe.
 set(SSX_HDTEX_INDEX "${CMAKE_CURRENT_SOURCE_DIR}/assets/hdtex_index.txt")
 # Button icon drawings (CC0), built into the exe (nv2a_btnicons.c).
@@ -102,8 +104,19 @@ endif()
 # The version resource (src/version_info.rc, numbers in src/version.h).
 set(SSX_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 configure_file(src/ssx_recomp.rc.in "${CMAKE_CURRENT_BINARY_DIR}/ssx_recomp.rc" @ONLY)
+if(WIN32)
 set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/ssx_recomp.rc" PROPERTIES
     OBJECT_DEPENDS "${SSX_APP_ICON};${SSX_HDTEX_INDEX};${SSX_BTNICON_FILES};${SSX_SRC_DIR}/version.h;${SSX_SRC_DIR}/version_info.rc")
+else()
+    # No Windows resources: the .rc's RCDATA files (HD texture index, button
+    # icons) as a C table, read through the runtime's FindResourceA.
+    set(SSX_RESOURCES_C "${CMAKE_CURRENT_BINARY_DIR}/ot_resources.c")
+    add_custom_command(OUTPUT "${SSX_RESOURCES_C}"
+        COMMAND "${CMAKE_COMMAND}" -DRC="${CMAKE_CURRENT_BINARY_DIR}/ssx_recomp.rc"
+                -DOUT="${SSX_RESOURCES_C}" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedResources.cmake"
+        DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/ssx_recomp.rc" "${SSX_HDTEX_INDEX}" ${SSX_BTNICON_FILES}
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedResources.cmake"
+        COMMENT "Embedding the resources (HD texture index, button icons)")
 endif()
 
 set(GAME_SOURCES
@@ -164,7 +177,7 @@ set_source_files_properties(src/crashreport.c PROPERTIES
 if(WIN32)
     list(APPEND GAME_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/ssx_recomp.rc")
 else()
-    list(APPEND GAME_SOURCES src/host_sdl.c src/touch_sdl.c)
+    list(APPEND GAME_SOURCES src/host_sdl.c src/touch_sdl.c "${SSX_RESOURCES_C}")
 endif()
 
 if(ANDROID)

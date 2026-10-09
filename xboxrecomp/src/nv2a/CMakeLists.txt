@@ -39,4 +39,6 @@ target_link_libraries(xbox_nv2a PRIVATE platform)
 target_link_libraries(xbox_nv2a PUBLIC xbox_d3d8)
 if(WIN32)
     target_link_libraries(xbox_nv2a PRIVATE kernel32)
+else()
+    target_link_libraries(xbox_nv2a PRIVATE z)     # PNG decoding of the button icons
 endif()

@@ -1151,105 +1151,6 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
     return STATUS_SUCCESS;
 }
 
-/* ---- Host-rewritten files (xbox_file_hook.h) ------------------------------
- *
- * A claimed file is opened the normal way (disc image or host file), read in
- * full and closed; the hook's replacement is then served from memory through
- * a virtual handle of the same kind as the ISO ones (read, size, seek). Only
- * plain read-only opens are claimed; anything the hook declines, or any
- * failure on the way, falls back to the original open. */
-#define MAX_FILE_HOOKS 4
-static xbox_file_hook_match_fn   s_hook_match[MAX_FILE_HOOKS];
-static xbox_file_hook_rewrite_fn s_hook_rewrite[MAX_FILE_HOOKS];
-static int s_hooks;
-
-void xbox_file_add_hook(xbox_file_hook_match_fn match, xbox_file_hook_rewrite_fn rewrite)
-{
-    if (!match || !rewrite || s_hooks == MAX_FILE_HOOKS) return;
-    s_hook_match[s_hooks] = match;
-    s_hook_rewrite[s_hooks] = rewrite;
-    s_hooks++;
-}
-
-void xbox_file_set_hook(xbox_file_hook_match_fn match, xbox_file_hook_rewrite_fn rewrite)
-{
-    xbox_file_add_hook(match, rewrite);
-}
-
-static BOOL hook_try_open(PHANDLE FileHandle, PXBOX_OBJECT_ATTRIBUTES ObjectAttributes,
-                          PXBOX_IO_STATUS_BLOCK IoStatusBlock, ULONG ShareAccess,
-                          ULONG CreateDisposition, ULONG CreateOptions, NTSTATUS *status)
-{
-    const char *path = get_xbox_path(ObjectAttributes);
-    HANDLE h = INVALID_HANDLE_VALUE, mh;
-    XBOX_IO_STATUS_BLOCK io;
-    XBOX_FILE_STANDARD_INFORMATION info;
-    uint8_t *orig = NULL, *out;
-    uint32_t size, got = 0, out_size = 0;
-    iso_handle *ih;
-    int k;
-
-    if (!s_hooks || !path) return FALSE;
-    if (CreateDisposition != XBOX_FILE_OPEN && CreateDisposition != XBOX_FILE_OPEN_IF) return FALSE;
-    if (CreateOptions & XBOX_FILE_DIRECTORY_FILE) return FALSE;
-    for (k = 0; k < s_hooks && !s_hook_match[k](path); k++) {}
-    if (k == s_hooks) return FALSE;            /* the first hook that claims it serves it */
-
-    if (!NT_SUCCESS(nt_create_file(&h, XBOX_GENERIC_READ, ObjectAttributes, &io, NULL,
-                                   0, ShareAccess, XBOX_FILE_OPEN, CreateOptions)))
-        return FALSE;
-    memset(&info, 0, sizeof info);
-    if (!NT_SUCCESS(xbox_NtQueryInformationFile(h, &io, &info, sizeof info,
-                                                XboxFileStandardInformation)) ||
-        info.EndOfFile.QuadPart <= 0 || info.EndOfFile.QuadPart > (1 << 20)) {
-        xbox_NtClose(h);
-        return FALSE;
-    }
-    size = (uint32_t)info.EndOfFile.QuadPart;
-    orig = (uint8_t *)malloc(size);
-    while (orig && got < size) {
-        if (!NT_SUCCESS(xbox_NtReadFile(h, NULL, NULL, NULL, &io, orig + got, size - got, NULL)) ||
-            io.Information == 0)
-            break;
-        got += (uint32_t)io.Information;
-    }
-    xbox_NtClose(h);
-    out = (orig && got == size) ? (uint8_t *)s_hook_rewrite[k](path, orig, size, &out_size) : NULL;
-    free(orig);
-    if (!out) return FALSE;
-
-    mh = iso_handle_alloc(0, out_size, FALSE);
-    ih = iso_handle_get(mh);
-    if (!ih) { free(out); return FALSE; }
-    ih->mem = out;
-    *FileHandle = mh;
-    if (IoStatusBlock) {
-        IoStatusBlock->Status = STATUS_SUCCESS;
-        IoStatusBlock->Information = 1;      /* FILE_OPENED */
-    }
-    xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE, "NtCreateFile: %s served rewritten by the host (%u -> %u bytes)",
-             path, size, out_size);
-    *status = STATUS_SUCCESS;
-    return TRUE;
-}
-
-NTSTATUS __stdcall xbox_NtCreateFile(
-    PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
-    PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
-    PLARGE_INTEGER AllocationSize, ULONG FileAttributes, ULONG ShareAccess,
-    ULONG CreateDisposition, ULONG CreateOptions)
-{
-    NTSTATUS st;
-    if (FileHandle && ObjectAttributes &&
-        !(DesiredAccess & (XBOX_GENERIC_WRITE | XBOX_GENERIC_ALL | XBOX_FILE_WRITE_DATA | XBOX_FILE_APPEND_DATA)) &&
-        hook_try_open(FileHandle, ObjectAttributes, IoStatusBlock, ShareAccess,
-                      CreateDisposition, CreateOptions, &st))
-        return st;
-    return nt_create_file(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock,
-                          AllocationSize, FileAttributes, ShareAccess,
-                          CreateDisposition, CreateOptions);
-}
-
 /* ======================================================================== */
 #else /* !_WIN32 */
 /* ====================  POSIX backend  =================================== */
@@ -1312,7 +1213,7 @@ static NTSTATUS errno_to_status(int e)
     }
 }
 
-NTSTATUS __stdcall xbox_NtCreateFile(
+static NTSTATUS nt_create_file(
     PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
     PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
     PLARGE_INTEGER AllocationSize, ULONG FileAttributes, ULONG ShareAccess,
@@ -1404,7 +1305,13 @@ NTSTATUS __stdcall xbox_NtReadFile(
         if (ih) {
             uint32_t off = (ByteOffset && ByteOffset->QuadPart >= 0)
                          ? (uint32_t)ByteOffset->QuadPart : ih->pos;
-            uint32_t got = xdvdfs_read(ih->sector, ih->size, off, Buffer, Length);
+            uint32_t got;
+            if (ih->mem) {                  /* host-rewritten (xbox_file_hook.h) */
+                got = off < ih->size ? ih->size - off : 0;
+                if (got > Length) got = Length;
+                if (got) memcpy(Buffer, ih->mem + off, got);
+            } else
+                got = xdvdfs_read(ih->sector, ih->size, off, Buffer, Length);
             if (!(ByteOffset && ByteOffset->QuadPart >= 0))
                 ih->pos = off + got;
             IoStatusBlock->Information = got;
@@ -1807,6 +1714,21 @@ static void posix_dir_context_release(HANDLE h)
     LeaveCriticalSection(&s_dir_cs);
 }
 
+/* As the Win32 backend: a scan still bound to a handle value (one left over
+ * from an earlier handle of the same value), and its release. */
+BOOL xbox_dir_context_bound(HANDLE FileHandle)
+{
+    BOOL bound = FALSE;
+    if (!s_dir_cs_init) return FALSE;
+    EnterCriticalSection(&s_dir_cs);
+    for (int i = 0; i < MAX_DIR_CONTEXTS; i++)
+        if (s_dir_contexts[i].handle == FileHandle && s_dir_contexts[i].dir) { bound = TRUE; break; }
+    LeaveCriticalSection(&s_dir_cs);
+    return bound;
+}
+
+void xbox_dir_context_release(HANDLE FileHandle) { posix_dir_context_release(FileHandle); }
+
 NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
     HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
     PXBOX_IO_STATUS_BLOCK IoStatusBlock, PVOID FileInformation, ULONG Length,
@@ -1953,6 +1875,106 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
 }
 
 #endif /* _WIN32 */
+
+/* ---- Host-rewritten files (xbox_file_hook.h) ------------------------------
+ *
+ * A claimed file is opened the normal way (disc image or host file), read in
+ * full and closed; the hook's replacement is then served from memory through
+ * a virtual handle of the same kind as the ISO ones (read, size, seek). Only
+ * plain read-only opens are claimed; anything the hook declines, or any
+ * failure on the way, falls back to the original open. */
+#define MAX_FILE_HOOKS 4
+static xbox_file_hook_match_fn   s_hook_match[MAX_FILE_HOOKS];
+static xbox_file_hook_rewrite_fn s_hook_rewrite[MAX_FILE_HOOKS];
+static int s_hooks;
+
+void xbox_file_add_hook(xbox_file_hook_match_fn match, xbox_file_hook_rewrite_fn rewrite)
+{
+    if (!match || !rewrite || s_hooks == MAX_FILE_HOOKS) return;
+    s_hook_match[s_hooks] = match;
+    s_hook_rewrite[s_hooks] = rewrite;
+    s_hooks++;
+}
+
+void xbox_file_set_hook(xbox_file_hook_match_fn match, xbox_file_hook_rewrite_fn rewrite)
+{
+    xbox_file_add_hook(match, rewrite);
+}
+
+static BOOL hook_try_open(PHANDLE FileHandle, PXBOX_OBJECT_ATTRIBUTES ObjectAttributes,
+                          PXBOX_IO_STATUS_BLOCK IoStatusBlock, ULONG ShareAccess,
+                          ULONG CreateDisposition, ULONG CreateOptions, NTSTATUS *status)
+{
+    const char *path = get_xbox_path(ObjectAttributes);
+    HANDLE h = INVALID_HANDLE_VALUE, mh;
+    XBOX_IO_STATUS_BLOCK io;
+    XBOX_FILE_STANDARD_INFORMATION info;
+    uint8_t *orig = NULL, *out;
+    uint32_t size, got = 0, out_size = 0;
+    iso_handle *ih;
+    int k;
+
+    if (!s_hooks || !path) return FALSE;
+    if (CreateDisposition != XBOX_FILE_OPEN && CreateDisposition != XBOX_FILE_OPEN_IF) return FALSE;
+    if (CreateOptions & XBOX_FILE_DIRECTORY_FILE) return FALSE;
+    for (k = 0; k < s_hooks && !s_hook_match[k](path); k++) {}
+    if (k == s_hooks) return FALSE;            /* the first hook that claims it serves it */
+
+    if (!NT_SUCCESS(nt_create_file(&h, XBOX_GENERIC_READ, ObjectAttributes, &io, NULL,
+                                   0, ShareAccess, XBOX_FILE_OPEN, CreateOptions)))
+        return FALSE;
+    memset(&info, 0, sizeof info);
+    if (!NT_SUCCESS(xbox_NtQueryInformationFile(h, &io, &info, sizeof info,
+                                                XboxFileStandardInformation)) ||
+        info.EndOfFile.QuadPart <= 0 || info.EndOfFile.QuadPart > (1 << 20)) {
+        xbox_NtClose(h);
+        return FALSE;
+    }
+    size = (uint32_t)info.EndOfFile.QuadPart;
+    orig = (uint8_t *)malloc(size);
+    while (orig && got < size) {
+        if (!NT_SUCCESS(xbox_NtReadFile(h, NULL, NULL, NULL, &io, orig + got, size - got, NULL)) ||
+            io.Information == 0)
+            break;
+        got += (uint32_t)io.Information;
+    }
+    xbox_NtClose(h);
+    out = (orig && got == size) ? (uint8_t *)s_hook_rewrite[k](path, orig, size, &out_size) : NULL;
+    free(orig);
+    if (!out) return FALSE;
+
+    mh = iso_handle_alloc(0, out_size, FALSE);
+    ih = iso_handle_get(mh);
+    if (!ih) { free(out); return FALSE; }
+    ih->mem = out;
+    *FileHandle = mh;
+    if (IoStatusBlock) {
+        IoStatusBlock->Status = STATUS_SUCCESS;
+        IoStatusBlock->Information = 1;      /* FILE_OPENED */
+    }
+    xbox_log(XBOX_LOG_INFO, XBOX_LOG_FILE, "NtCreateFile: %s served rewritten by the host (%u -> %u bytes)",
+             path, size, out_size);
+    *status = STATUS_SUCCESS;
+    return TRUE;
+}
+
+NTSTATUS __stdcall xbox_NtCreateFile(
+    PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
+    PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
+    PLARGE_INTEGER AllocationSize, ULONG FileAttributes, ULONG ShareAccess,
+    ULONG CreateDisposition, ULONG CreateOptions)
+{
+    NTSTATUS st;
+    if (FileHandle && ObjectAttributes &&
+        !(DesiredAccess & (XBOX_GENERIC_WRITE | XBOX_GENERIC_ALL | XBOX_FILE_WRITE_DATA | XBOX_FILE_APPEND_DATA)) &&
+        hook_try_open(FileHandle, ObjectAttributes, IoStatusBlock, ShareAccess,
+                      CreateDisposition, CreateOptions, &st))
+        return st;
+    return nt_create_file(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock,
+                          AllocationSize, FileAttributes, ShareAccess,
+                          CreateDisposition, CreateOptions);
+}
+
 
 /* ======================================================================== */
 /* ====================  Platform-independent  ============================ */

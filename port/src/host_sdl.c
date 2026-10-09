@@ -115,32 +115,31 @@ static int java_open_disc(int forget)
 }
 #endif
 
+static int host_message_box(const char *text, const char *caption, UINT type);
+
 BOOL host_launcher_run(struct LauncherConfig *cfg)
 {
-    char ini[1024];
+    /* Called when settings.ini has no disc image that works (main.c). */
 #ifdef __ANDROID__
-    /* A path in the .ini (a copy in the app's folder) is used as it is; else
-     * the disc image chosen in the system's file picker. Asked again when
-     * the game found the last one unusable (it comes back here). */
-    static int asked;
-    if (cfg->iso[0] && strncmp(cfg->iso, "fd:", 3) && !asked) { asked = 1; return TRUE; }
-    {
-        /* Back here after an "fd:" image: it was unusable, pick another. */
-        int fd = java_open_disc(asked++ && !strncmp(cfg->iso, "fd:", 3));
-        if (fd < 0) return FALSE;                  /* cancelled: the app closes */
-        snprintf(cfg->iso, sizeof cfg->iso, "fd:%d", fd);
-        return TRUE;
-    }
-#endif
-    if (cfg->iso[0]) return TRUE;
-    launcher_config_path(ini, sizeof ini);
-#ifdef __ANDROID__
+    /* The system's file picker; after an "fd:" image that did not work, it
+     * says so. The choice is not written to settings.ini: the app keeps the
+     * permission and opens it again at the next start. */
+    int fd = java_open_disc(!strncmp(cfg->iso, "fd:", 3));
+    if (fd < 0) return FALSE;                     /* cancelled: the app closes */
+    snprintf(cfg->iso, sizeof cfg->iso, "fd:%d", fd);
+    return TRUE;
 #else
-    fprintf(stderr, "No disc image is set. Put DiscImage=/path/to/SSX Tricky (USA).iso in [Game]\n"
+    char ini[1024];
+    launcher_config_path(ini, sizeof ini);
+    if (!launcher_config_save(cfg))               /* so there is a file to edit */
+        fprintf(stderr, "Could not write %s\n", ini);
+    fprintf(stderr, "No usable disc image. Put DiscImage=/path/to/SSX Tricky (USA).iso in [Game]\n"
                     "of %s, or start with the image on the command line.\n", ini);
-    launcher_config_save(cfg);       /* so there is a file to edit */
-#endif
+    host_message_box("No usable disc image is set.\n\nSet DiscImage in [Game] of settings.ini "
+                     "beside the game, or start it with the disc image on the command line.",
+                     "SSX Tricky", 0x30);
     return FALSE;
+#endif
 }
 
 /* ---- message boxes ------------------------------------------------------- */
@@ -386,6 +385,9 @@ int host_run(int (*game_main)(void))
     int w = 1280, h = 960, dw = 0, dh = 0;
     Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 
+    /* settings.ini, the saves and the log live in the data folder
+     * (settings.c's game folder is OT_DATA_DIR). */
+    setenv("OT_DATA_DIR", host_data_dir(), 0);
 #ifdef __ANDROID__
     {   /* Android drops stdout and stderr: everything goes to the log in the
          * app's folder, replaced at each start, for bug reports. */

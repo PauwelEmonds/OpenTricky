@@ -9,7 +9,11 @@
 #endif
 #define COBJMACROS
 #include <windows.h>
+#ifdef _WIN32
 #include <wincodec.h>
+#else
+#include <zlib.h>           /* PNG's deflate (decode_png below) */
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -288,6 +292,117 @@ static uint64_t fnv64(const uint8_t *p, uint32_t n)
 }
 
 /* ── Drawings: PNG resources decoded by WIC to straight RGBA ───────────── */
+#ifndef _WIN32
+/* Linux / Android: no WIC. A plain PNG reader (non-interlaced; gray, RGB,
+ * palette, gray + alpha, RGBA; 8 or 16 bits) with zlib's inflate, to the
+ * same straight RGBA. */
+static uint32_t be32(const uint8_t *p)
+{
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+
+static int decode_png(const void *data, DWORD size, Img *out)
+{
+    const uint8_t *p = (const uint8_t *)data, *end = p + size;
+    uint8_t *z = NULL, *raw = NULL, plte[256 * 3], trns[256];
+    size_t zn = 0, zcap = 0, stride, rawn;
+    uint32_t w = 0, h = 0, x, y;
+    int depth = 0, ctype = -1, interlace = 0, ch, bpp, ok = 0, ntrns = 0;
+    uLongf got;
+
+    memset(trns, 255, sizeof trns);
+    static const uint8_t sig[8] = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+    if (size < 8 || memcmp(p, sig, 8)) return 0;
+    p += 8;
+    while (p + 12 <= end) {
+        uint32_t len = be32(p);
+        const uint8_t *t = p + 4, *d = p + 8;
+        if (len > (uint32_t)(end - d) - 4) break;
+        if (!memcmp(t, "IHDR", 4) && len >= 13) {
+            w = be32(d); h = be32(d + 4); depth = d[8]; ctype = d[9]; interlace = d[12];
+        } else if (!memcmp(t, "PLTE", 4)) {
+            memcpy(plte, d, len < sizeof plte ? len : sizeof plte);
+        } else if (!memcmp(t, "tRNS", 4) && ctype == 3) {
+            ntrns = len < 256 ? (int)len : 256;
+            memcpy(trns, d, (size_t)ntrns);
+        } else if (!memcmp(t, "IDAT", 4)) {
+            if (zn + len > zcap) {
+                uint8_t *nz;
+                zcap = (zn + len) * 2;
+                if (!(nz = (uint8_t *)realloc(z, zcap))) goto done;
+                z = nz;
+            }
+            memcpy(z + zn, d, len);
+            zn += len;
+        } else if (!memcmp(t, "IEND", 4)) {
+            break;
+        }
+        p = d + len + 4;
+    }
+    if (!w || !h || w > 1024 || h > 1024 || interlace || !z) goto done;
+    switch (ctype) {
+    case 0: ch = 1; break;
+    case 2: ch = 3; break;
+    case 3: ch = 1; break;
+    case 4: ch = 2; break;
+    case 6: ch = 4; break;
+    default: goto done;
+    }
+    if (!(depth == 8 || (depth == 16 && ctype != 3))) goto done;
+    bpp = ch * depth / 8;
+    stride = (size_t)w * bpp;
+    rawn = (stride + 1) * h;
+    if (!(raw = (uint8_t *)malloc(rawn))) goto done;
+    got = (uLongf)rawn;
+    if (uncompress(raw, &got, z, (uLong)zn) != Z_OK || got != rawn) goto done;
+    /* Undo the filters, in place: each row after its filter byte. */
+    for (y = 0; y < h; y++) {
+        uint8_t *r = raw + y * (stride + 1) + 1, *u = y ? r - (stride + 1) : NULL;
+        int f = r[-1];
+        size_t i;
+        for (i = 0; i < stride; i++) {
+            int a = i >= (size_t)bpp ? r[i - bpp] : 0, b = u ? u[i] : 0;
+            int c = (u && i >= (size_t)bpp) ? u[i - bpp] : 0, pr;
+            switch (f) {
+            case 1: r[i] = (uint8_t)(r[i] + a); break;
+            case 2: r[i] = (uint8_t)(r[i] + b); break;
+            case 3: r[i] = (uint8_t)(r[i] + ((a + b) >> 1)); break;
+            case 4: {
+                int pa = abs(b - c), pb = abs(a - c), pc = abs(a + b - 2 * c);
+                pr = (pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c);
+                r[i] = (uint8_t)(r[i] + pr);
+                break;
+            }
+            default: break;
+            }
+        }
+    }
+    if (!(out->rgba = (uint8_t *)malloc((size_t)w * h * 4))) goto done;
+    for (y = 0; y < h; y++) {
+        const uint8_t *r = raw + y * (stride + 1) + 1;
+        for (x = 0; x < w; x++) {
+            uint8_t *q = out->rgba + ((size_t)y * w + x) * 4;
+            const uint8_t *s0 = r + (size_t)x * bpp;
+            int k = depth == 16 ? 2 : 1;          /* 16-bit: the high bytes */
+            switch (ctype) {
+            case 0: q[0] = q[1] = q[2] = s0[0]; q[3] = 255; break;
+            case 2: q[0] = s0[0]; q[1] = s0[k]; q[2] = s0[2 * k]; q[3] = 255; break;
+            case 3: q[0] = plte[s0[0] * 3]; q[1] = plte[s0[0] * 3 + 1]; q[2] = plte[s0[0] * 3 + 2];
+                    q[3] = trns[s0[0]]; break;
+            case 4: q[0] = q[1] = q[2] = s0[0]; q[3] = s0[k]; break;
+            default: q[0] = s0[0]; q[1] = s0[k]; q[2] = s0[2 * k]; q[3] = s0[3 * k]; break;
+            }
+        }
+    }
+    out->w = (int)w;
+    out->h = (int)h;
+    ok = 1;
+done:
+    free(z);
+    free(raw);
+    return ok;
+}
+#else
 static int decode_png(const void *data, DWORD size, Img *out)
 {
     IWICImagingFactory *f = NULL;
@@ -332,6 +447,7 @@ done:
     if (uninit) CoUninitialize();
     return ok;
 }
+#endif
 
 /* The replay help draws the D-pad disc and the two sticks on a dark
  * background, where the pack's near-black bodies vanish: their dark texels

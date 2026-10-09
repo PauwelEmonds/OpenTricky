@@ -372,6 +372,46 @@ IDirect3DTexture8 *gles_WrapTexture(GLuint tex, UINT w, UINT h)
     return &t->iface;
 }
 
+/* A texture made once from its finished levels (BGRA rows, tightly packed;
+ * level i is max(w >> i, 1) x max(h >> i, 1)) and only sampled: HD
+ * replacements and button icons. */
+HRESULT d3d8_CreateTextureFromLevels(UINT Width, UINT Height, UINT Levels,
+                                     const void *const *level_bits, IDirect3DTexture8 **ppTex)
+{
+    GLuint tex = 0;
+    IDirect3DTexture8 *t;
+    uint8_t *rgba;
+    UINT i;
+    if (!ppTex || !Width || !Height || !Levels || !level_bits) return E_INVALIDARG;
+    *ppTex = NULL;
+    gles_check_thread("CreateTextureFromLevels");
+    rgba = (uint8_t *)malloc((size_t)Width * Height * 4);
+    if (!rgba) return E_OUTOFMEMORY;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, (GLsizei)Levels, GL_RGBA8, (GLsizei)Width, (GLsizei)Height);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    for (i = 0; i < Levels; i++) {
+        UINT w = Width >> i ? Width >> i : 1, h = Height >> i ? Height >> i : 1;
+        const uint8_t *src = (const uint8_t *)level_bits[i];
+        size_t k, n = (size_t)w * h;
+        for (k = 0; k < n; k++) {
+            rgba[k * 4 + 0] = src[k * 4 + 2];
+            rgba[k * 4 + 1] = src[k * 4 + 1];
+            rgba[k * 4 + 2] = src[k * 4 + 0];
+            rgba[k * 4 + 3] = src[k * 4 + 3];
+        }
+        glTexSubImage2D(GL_TEXTURE_2D, (GLint)i, 0, 0, (GLsizei)w, (GLsizei)h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    }
+    free(rgba);
+    gles_invalidate_state();
+    t = gles_WrapTexture(tex, Width, Height);
+    if (!t) { glDeleteTextures(1, &tex); return E_OUTOFMEMORY; }
+    ((GlTexture *)t)->levels = Levels;
+    *ppTex = t;
+    return S_OK;
+}
+
 /* ---- vertex / index buffers (CPU copies) -------------------------------- */
 
 static HRESULT __stdcall buf_QueryInterface(void *s, const IID *r, void **p)

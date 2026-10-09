@@ -285,6 +285,41 @@ void d3d8_RequestScreenshot(const wchar_t *path)
     d3d8_RequestScreenshotUtf8(p);
 }
 
+/* 1 while a requested screenshot has not been written yet. */
+int d3d8_ScreenshotPending(void)
+{
+    int p;
+    pthread_mutex_lock(&s_shot_lock);
+    p = s_shot_path[0] != 0;
+    pthread_mutex_unlock(&s_shot_lock);
+    return p;
+}
+
+/* The image framed at 16:9 (or 4:3, XBOX_WIDE_MENUS=43) on a wider display,
+ * as d3d8_device.c: the translator sets it per image. */
+static volatile int s_present_box;
+static double s_present_box_shape = 16.0 / 9.0;
+void d3d8_SetPresentBox(int on) { __atomic_store_n(&s_present_box, on ? 1 : 0, __ATOMIC_RELAXED); }
+void d3d8_SetPresentBoxShape(double shape) { s_present_box_shape = shape > 1.0 ? shape : 16.0 / 9.0; }
+
+/* The display's refresh rate (XBOX_FPS_CAP=monitor). */
+int d3d8_monitor_hz(HWND hwnd)
+{
+    SDL_DisplayMode m;
+    int d = s_window ? SDL_GetWindowDisplayIndex(s_window) : 0;
+    (void)hwnd;
+    if (d < 0) d = 0;
+    if (SDL_GetCurrentDisplayMode(d, &m) == 0 && m.refresh_rate > 0) return m.refresh_rate;
+    return 60;
+}
+
+/* Occlusion queries go out with the next GL commands; a flush hands them
+ * over now, as the D3D11 backend's context flush. */
+void d3d8_OcclusionFlush(void) { glFlush(); }
+
+/* XBOX_PUMPLAG's frame capture (diagnostic): Windows only. */
+void d3d8_PlagShot(void) {}
+
 /* Where screenshots go; the host may set it (Android: the app's files). */
 static char s_shot_dir[1024] = "Screenshots";
 void d3d8_SetScreenshotDir(const char *dir) { if (dir) snprintf(s_shot_dir, sizeof s_shot_dir, "%s", dir); }
@@ -498,8 +533,10 @@ static void host_present_impl(void)
     SDL_GL_GetDrawableSize(s_window, &dw, &dh);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     if (dw > 0 && dh > 0) {
-        const double aspect = d3d8_HostAspect();
+        double aspect = d3d8_HostAspect();
         int rw, rh;
+        if (__atomic_load_n(&s_present_box, __ATOMIC_RELAXED) && aspect > s_present_box_shape + 0.005)
+            aspect = s_present_box_shape;
         if ((double)dw / (double)dh > aspect) { rh = dh; rw = (int)(dh * aspect + 0.5); }
         else { rw = dw; rh = (int)(dw / aspect + 0.5); }
         if (rw > dw) rw = dw;
