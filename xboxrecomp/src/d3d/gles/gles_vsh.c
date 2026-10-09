@@ -110,12 +110,13 @@ static const char g_prelude[] =
     "                                isnan(v.z) ? 1.0 : v.z, isnan(v.w) ? 1.0 : v.w); }\n";
 
 int gles_vsh_glsl(const vshcpu_insn *p, int n, uint16_t inputs, const uint8_t kind[16],
-                  char *buf, int cap)
+                  int points, char *buf, int cap)
 {
     Sb b = { buf, buf + cap, 0 };
     int k, a;
 
     sb(&b, "%s", g_prelude);
+    if (points) sb(&b, "#define NV_POINTS 1\n");
     for (a = 0; a < 16; a++) {
         if (!(inputs & (1u << a)) || (kind[a] & 0x0F) == NV2A_VSH_IN_CONST) continue;
         switch (kind[a] & 0x0F) {
@@ -234,10 +235,28 @@ int gles_vsh_glsl(const vshcpu_insn *p, int n, uint16_t inputs, const uint8_t ki
        "    float w = O0.w;\n"
        "    if (w >= 0.0) w = clamp(w, 5.421011e-20, 1.8446744e19); else w = clamp(w, -1.8446744e19, -5.421011e-20);\n"
        "    float rhw = 1.0 / w, wc = 1.0 / rhw;\n"
+       "    bool ok = fin(x) && fin(y) && fin(z) && fin(rhw);\n"
+       "#ifdef NV_POINTS\n"
+       /* The point's corner: triangles 0 1 2 and 2 1 3 of the corners
+        * (-h,-h) (+h,-h) (-h,+h) (+h,+h); size as draw_program() takes it. */
+       "    const int cc[6] = int[6](0, 1, 2, 2, 1, 3);\n"
+       "    int c = cc[gl_VertexID];\n"
+       "    float s = ptparm.x != 0.0 ? O6.x * screen.w : ptparm.y;\n"
+       "    if (!(s >= 1.0)) s = 1.0;\n"
+       "    if (s > 2048.0) s = 2048.0;\n"
+       "    float h = s * 0.5;\n"
+       "    x += ((c & 1) != 0 ? h : -h) * ptparm.w;\n"
+       "    y += (c & 2) != 0 ? h : -h;\n"
+       "#endif\n"
        "    vec4 p = vec4((x / screen.x * 2.0 - 1.0) * wc, (1.0 - y / screen.y * 2.0) * wc, z * wc, wc);\n"
        "    if (glp.x != 0.0 && p.w > 0.0) p.z = clamp(p.z, 0.0, p.w);\n"
        "    gl_Position = vec4(p.x, -p.y, 2.0 * p.z - p.w, p.w);\n"
-       "    if (!(fin(x) && fin(y) && fin(z) && fin(rhw))) gl_Position = vec4(uintBitsToFloat(0x7FC00000u));\n"
+       "#ifdef NV_POINTS\n"
+       /* A point that cannot be placed: all six corners at one spot, no area. */
+       "    if (!ok) gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n"
+       "#else\n"
+       "    if (!ok) gl_Position = vec4(uintBitsToFloat(0x7FC00000u));\n"
+       "#endif\n"
        "    gl_PointSize = 1.0;\n"
        "    v_d0 = nan1(O3);\n"
        "    v_d1 = nan1(O4);\n"
@@ -245,6 +264,9 @@ int gles_vsh_glsl(const vshcpu_insn *p, int n, uint16_t inputs, const uint8_t ki
        "    else if (flags.y == 0.0) v_d1.w = 1.0;\n"
        "    v_fog = fogf(O5.x);\n"
        "    v_t0 = O9; v_t1 = O10; v_t2 = O11; v_t3 = O12;\n"
+       "#ifdef NV_POINTS\n"
+       "    if (ptparm.z != 0.0) v_t3 = vec4((c & 1) != 0 ? 1.0 : 0.0, (c & 2) != 0 ? 1.0 : 0.0, 1.0, 1.0);\n"
+       "#endif\n"
        "}\n");
     return b.overflow ? -1 : (int)(b.p - buf);
 }

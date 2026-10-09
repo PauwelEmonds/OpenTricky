@@ -18,8 +18,10 @@ serves both: the Android app is the Linux build packaged as `libmain.so`.
 
 Not ported yet (all off by default on Windows too): the post chain and SMAA,
 soft shadows, the GPU profiler. Vertex programs run on the GPU as on Windows,
-as GLSL (`gles/gles_vsh.c`, the HLSL generator's rules); point sprites are
-expanded on the CPU (ES 3.0 has no geometry shader).
+as GLSL (`gles/gles_vsh.c`, the HLSL generator's rules). Point sprites too:
+ES 3.0 has no geometry shader, so each point is an instance of six vertices
+whose shader builds the square (`XBOX_FIX_POINTS_GPU=0` expands them on the
+CPU instead).
 
 Switches for testing: `OT_GL_VSH=0` runs vertex programs on the CPU;
 `OT_GL_UPLOAD=map|sub` picks how vertices go up (mapped by default,

@@ -990,6 +990,7 @@ static GLuint vsh_get(const Nv2aVshDraw *d, uint64_t *keyp)
     int len;
     vsh_kinds(d, kind);
     key = fnv64(d->prog_hash, kind, sizeof kind);
+    if (d->topology == D3DPT_POINTLIST) key = fnv64(key, "pts", 3);
     if (!key) key = 1;
     *keyp = key;
     h = (unsigned)(key ^ (key >> 31)) & (VSH_CACHE - 1);
@@ -1002,7 +1003,8 @@ static GLuint vsh_get(const Nv2aVshDraw *d, uint64_t *keyp)
     g_vsh[h].key = key;
     g_vsh[h].done = 1;
     g_vsh[h].sh = 0;
-    len = gles_vsh_glsl(d->prog, d->prog_len, d->inputs, kind, src, (int)sizeof src);
+    len = gles_vsh_glsl(d->prog, d->prog_len, d->inputs, kind, d->topology == D3DPT_POINTLIST,
+                        src, (int)sizeof src);
     if (len <= 0) return 0;
     {
         double t0 = now_ms();
@@ -1048,7 +1050,14 @@ static GLuint pair_get(uint64_t vkey, GLuint vs, int psi)
     return p;
 }
 
-int d3d8_points_gpu_on(void) { return 0; }
+/* XBOX_FIX_POINTS_GPU (default 1, as on Windows): the particles' squares are
+ * built by the vertex shader, one instance per point; 0 keeps them on the CPU. */
+int d3d8_points_gpu_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("XBOX_FIX_POINTS_GPU"); on = !(e && e[0] == '0'); }
+    return on && vsh_on();
+}
 
 /* OT_UPLOAD_STATS=1: what the vertex-program draws upload, per frame. */
 static int s_ustats = -1;
@@ -1083,7 +1092,7 @@ int d3d8_nv2a_vsh_ready(const Nv2aVshDraw *d)
 {
     uint64_t key;
     int a;
-    if (!vsh_on() || d->topology == D3DPT_POINTLIST) return 0;
+    if (!vsh_on() || (d->topology == D3DPT_POINTLIST && !d3d8_points_gpu_on())) return 0;
     for (a = 0; a < 16; a++) {
         GLint n; GLenum t; GLboolean nm; int in;
         if (!(d->inputs & (1u << a)) || (d->attr[a].kind & 0x0F) == NV2A_VSH_IN_CONST) continue;
@@ -1100,6 +1109,9 @@ int d3d8_nv2a_draw_program_gpu(const Nv2aVshDraw *d)
     int8_t agrp[16];
     uint16_t done = 0;
     unsigned cmask = 0, amask = 0;
+    int points = 0;
+    static uint8_t *gather[16];
+    static size_t gather_cap[16];
     uint32_t bv = 0;
     static uint32_t *ib;
     static uint32_t ib_cap;
@@ -1114,6 +1126,7 @@ int d3d8_nv2a_draw_program_gpu(const Nv2aVshDraw *d)
     case D3DPT_TRIANGLELIST: prim = GL_TRIANGLES;  break;
     case D3DPT_LINELIST:     prim = GL_LINES;      break;
     case D3DPT_LINESTRIP:    prim = GL_LINE_STRIP; break;
+    case D3DPT_POINTLIST:    prim = GL_TRIANGLES;  points = 1; break;
     default: return 0;
     }
     gles_check_thread("nv2a_draw_program_gpu");
@@ -1159,17 +1172,42 @@ int d3d8_nv2a_draw_program_gpu(const Nv2aVshDraw *d)
     PERF_STEP(PZ_DSTATE);
 
     glBindVertexArray(s_vao);
+    if (points) {
+        /* Instances step through an array without indices: the points'
+         * vertices, in draw order, one array per group. */
+        uint32_t k;
+        for (g = 0; g < ngrp; g++) {
+            size_t need = (size_t)d->nindices * grp[g].stride;
+            if (need > gather_cap[g]) {
+                uint8_t *nb = (uint8_t *)realloc(gather[g], need);
+                if (!nb) return 0;
+                gather[g] = nb;
+                gather_cap[g] = need;
+            }
+            for (k = 0; k < d->nindices; k++) {
+                size_t src = (size_t)d->indices[k] * grp[g].stride;
+                size_t len = grp[g].stride;
+                if (src >= grp[g].size) { memset(gather[g] + (size_t)k * grp[g].stride, 0, len); continue; }
+                if (src + len > grp[g].size) len = grp[g].size - src;
+                memcpy(gather[g] + (size_t)k * grp[g].stride, grp[g].base + src, len);
+            }
+        }
+    }
     {
         GLsizeiptr total = 0;
-        for (g = 0; g < ngrp; g++) total += grp[g].size + grp[g].stride;
+        for (g = 0; g < ngrp; g++)
+            total += (points ? (GLsizeiptr)d->nindices * grp[g].stride : grp[g].size) + grp[g].stride;
         stream_reserve(&s_vtx, total);
     }
     /* One array (the usual case): put it at a multiple of its stride and add
      * that vertex number to the indices, so the pointers stay at the
      * buffer's start and the next draw of the same layout sets none. */
     for (g = 0; g < ngrp; g++) {
-        grp[g].off = stream_put(&s_vtx, grp[g].base, (GLsizeiptr)grp[g].size,
-                                ngrp == 1 ? (GLsizeiptr)grp[g].stride : 4);
+        if (points)
+            grp[g].off = stream_put(&s_vtx, gather[g], (GLsizeiptr)d->nindices * grp[g].stride, 4);
+        else
+            grp[g].off = stream_put(&s_vtx, grp[g].base, (GLsizeiptr)grp[g].size,
+                                    ngrp == 1 ? (GLsizeiptr)grp[g].stride : 4);
         if (grp[g].off < 0) return 0;
     }
     if (s_ustats < 0) s_ustats = getenv("OT_UPLOAD_STATS") != NULL;
@@ -1178,12 +1216,12 @@ int d3d8_nv2a_draw_program_gpu(const Nv2aVshDraw *d)
         s_us_acc.ib += d->nindices * 4.0;
         s_us_acc.draws++;
     }
-    if (ngrp == 1) { bv = (uint32_t)(grp[0].off / grp[0].stride); grp[0].off = 0; }
+    if (ngrp == 1 && !points) { bv = (uint32_t)(grp[0].off / grp[0].stride); grp[0].off = 0; }
     for (a = 0; a < 16; a++) if (agrp[a] >= 0) amask |= 1u << a;
     attribs_mask(amask);
     {
         uint64_t lay = 0;
-        if (ngrp == 1) {
+        if (ngrp == 1 && !points) {
             lay = fnv64(1469598103934665603ull, &grp[0].stride, 4);
             for (a = 0; a < 16; a++)
                 if (agrp[a] >= 0) {
@@ -1202,6 +1240,7 @@ int d3d8_nv2a_draw_program_gpu(const Nv2aVshDraw *d)
                 p = (const void *)(grp[g].off + (GLintptr)(d->attr[a].base - grp[g].base));
                 if (in) glVertexAttribIPointer((GLuint)a, n, t, (GLsizei)grp[g].stride, p);
                 else    glVertexAttribPointer((GLuint)a, n, t, nm, (GLsizei)grp[g].stride, p);
+                if (points) glVertexAttribDivisor((GLuint)a, 1);
             }
             S.layout = lay;
         }
@@ -1209,7 +1248,9 @@ int d3d8_nv2a_draw_program_gpu(const Nv2aVshDraw *d)
     for (a = 0; a < 16; a++)
         if (cmask & (1u << a)) attr_const_set((GLuint)a, d->attr[a].dxgi_format, d->attr[a].base);
     s_cur_dirty |= cmask;
-    if (bv) {
+    if (points) {
+        ioff = 0;
+    } else if (bv) {
         uint32_t k;
         if (d->nindices > ib_cap) {
             uint32_t *nb = (uint32_t *)realloc(ib, (size_t)d->nindices * 4);
@@ -1273,7 +1314,12 @@ int d3d8_nv2a_draw_program_gpu(const Nv2aVshDraw *d)
         return 0;
     PERF_STEP(PZ_DCB);
 
-    glDrawElements(prim, (GLsizei)d->nindices, GL_UNSIGNED_INT, (const void *)ioff);
+    if (points) {
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 6, (GLsizei)d->nindices);
+        for (a = 0; a < 16; a++)
+            if (agrp[a] >= 0) glVertexAttribDivisor((GLuint)a, 0);
+    } else
+        glDrawElements(prim, (GLsizei)d->nindices, GL_UNSIGNED_INT, (const void *)ioff);
     if (getenv("OT_VSH_DUMP")) {
         static int n;
         GLenum e = glGetError();
