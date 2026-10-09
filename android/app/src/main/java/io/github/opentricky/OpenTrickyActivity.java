@@ -17,6 +17,12 @@ import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.system.Os;
 import android.util.Log;
+import android.util.TypedValue;
+import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
+import android.widget.Switch;
+import android.widget.TextView;
 
 import org.libsdl.app.SDLActivity;
 
@@ -127,6 +133,64 @@ public class OpenTrickyActivity extends SDLActivity {
     protected void onActivityResult(int request, int result, Intent data) {
         if (request == REQ_ISO) { picked(result == RESULT_OK && data != null ? data.getData() : null); return; }
         super.onActivityResult(request, result, data);
+    }
+
+    /** The options (the touch controls' options button, or Back): the frame rate, 60 or the screen's rate (hz), and the
+     *  frame rate counter. Blocks until closed: -1 cancelled, else the frame rate | 0x10000 with the counter on. */
+    public static int options(final int fps, final int hz, final boolean counter) {
+        final Activity a = (Activity) SDLActivity.getContext();
+        if (a == null) return -1;
+        final Object lock = new Object();
+        final int[] r = { -2 };
+        a.runOnUiThread(() -> {
+            // The views in the dialog's own theme (the activity's would draw the switch as a bare "on/off" label).
+            final android.content.Context t = new android.view.ContextThemeWrapper(a, android.R.style.Theme_DeviceDefault_Dialog_Alert);
+            final float dp = a.getResources().getDisplayMetrics().density;
+            final int pad = (int) (24 * dp);
+            LinearLayout box = new LinearLayout(t);
+            box.setOrientation(LinearLayout.VERTICAL);
+            box.setPadding(pad, (int) (8 * dp), pad, 0);
+
+            TextView head = new TextView(t);
+            head.setText("Frame rate");
+            head.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            head.setAlpha(0.7f);
+            box.addView(head);
+
+            final RadioGroup rate = new RadioGroup(t);
+            RadioButton r60 = new RadioButton(t);
+            r60.setId(60);
+            r60.setText("60 fps  –  as on the Xbox, uses less battery");
+            rate.addView(r60);
+            if (hz > 61) {
+                RadioButton rhz = new RadioButton(t);
+                rhz.setId(hz);
+                rhz.setText(hz + " fps  –  smoother, the screen's own rate");
+                rate.addView(rhz);
+            }
+            rate.check(fps > 61 && hz > 61 ? hz : 60);
+            box.addView(rate);
+
+            final Switch show = new Switch(t);
+            show.setText("Show the frame rate");
+            show.setChecked(counter);
+            show.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+            show.setPadding(0, (int) (16 * dp), 0, (int) (8 * dp));
+            box.addView(show);
+
+            AlertDialog d = new AlertDialog.Builder(a, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Graphics")
+                .setView(box)
+                .setPositiveButton("Done", (x, w) -> answer(lock, r, rate.getCheckedRadioButtonId() | (show.isChecked() ? 0x10000 : 0)))
+                .setNegativeButton("Cancel", (x, w) -> answer(lock, r, -1))
+                .setOnCancelListener(x -> answer(lock, r, -1))
+                .create();
+            d.show();
+        });
+        synchronized (lock) {
+            while (r[0] == -2) try { lock.wait(); } catch (InterruptedException e) { return -1; }
+        }
+        return r[0];
     }
 
     /** A message with up to three buttons over the game; 1 for b1, 0 for b2, -1 for b3. Blocks until one is pressed. */

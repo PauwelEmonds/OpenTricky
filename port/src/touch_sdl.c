@@ -40,7 +40,7 @@ typedef struct {
 /* Positions in units of the screen height, so the controls keep their size
  * and shape on any aspect ratio: A B X Y as a diamond on the right, the
  * triggers over the bumpers in the top corners, View and Menu (BACK, START)
- * at the top middle. */
+ * at the top middle, the options (\x03, no pad button) beside them. */
 static const Button k_buttons[] = {
     { "A",    1, 0.21f, 0.80f, 0.135f, 0.135f, AN_RIGHT,  XINPUT_GAMEPAD_A, 0, 0.42f, 0.84f, 0.29f },
     { "B",    1, 0.10f, 0.69f, 0.135f, 0.135f, AN_RIGHT,  XINPUT_GAMEPAD_B, 0, 0.96f, 0.36f, 0.33f },
@@ -52,7 +52,10 @@ static const Button k_buttons[] = {
     { "RB",   0, 0.17f, 0.21f, 0.18f, 0.085f, AN_RIGHT,  XINPUT_GAMEPAD_RIGHT_SHOULDER, 0, 0.92f, 0.93f, 0.95f },
     { "\x01", 1, -0.075f, 0.075f, 0.085f, 0.085f, AN_CENTRE, XINPUT_GAMEPAD_BACK, 0, 0.92f, 0.93f, 0.95f },
     { "\x02", 1, 0.075f, 0.075f, 0.085f, 0.085f, AN_CENTRE, XINPUT_GAMEPAD_START, 0, 0.92f, 0.93f, 0.95f },
+    { "\x03", 1, 0.25f, 0.075f, 0.075f, 0.075f, AN_CENTRE, 0, 0, 0.92f, 0.93f, 0.95f },
 };
+#define OPTIONS_BUTTON (NBUTTONS - 1)
+#define COUNTER_X (-0.25f)      /* the frame rate counter, from the centre (screen heights) */
 #define NBUTTONS ((int)(sizeof k_buttons / sizeof k_buttons[0]))
 
 /* The stick's resting place (shown faintly until a thumb lands), its reach. */
@@ -72,6 +75,10 @@ static volatile int   s_stick_on;
 static volatile int   s_pressed;                /* bit per button */
 static volatile Uint32 s_last_touch, s_last_pad;
 static int s_screen_w = 1, s_screen_h = 1;
+static volatile int s_options;                  /* the options button was released */
+
+void d3d8_SetShowFps(int on);
+int  d3d8_GetShowFps(void);
 
 /* A button's rectangle in pixels. */
 static void place(const Button *b, float *x0, float *y0, float *x1, float *y1)
@@ -175,16 +182,32 @@ void touch_event(const SDL_Event *e, int screen_w, int screen_h)
     } else if (slot >= 0) {                               /* up */
         if (s_fingers[slot].button == -1) s_stick_on = 0;
         else s_pressed &= ~(1 << s_fingers[slot].button);
+        if (s_fingers[slot].button == OPTIONS_BUTTON) s_options = 1;
         s_fingers[slot].used = 0;
     }
     publish();
+}
+
+/* The options button was released: the host opens the options (host_sdl.c).
+ * The options take the touches while they are open, so every finger is let
+ * go now rather than left held. */
+int touch_take_options(void)
+{
+    if (!s_options) return 0;
+    s_options = 0;
+    memset(s_fingers, 0, sizeof s_fingers);
+    s_pressed = 0;
+    s_stick_on = 0;
+    publish();
+    return 1;
 }
 
 /* ---- drawing (render thread) ----------------------------------------------- */
 
 /* The labels as strokes on a 4 x 6 grid (y down), drawn as distance fields:
  * sharp at any size, with round ends. \x01 is the View icon (BACK), \x02
- * the Menu icon (START), as on the Xbox controllers since the One. */
+ * the Menu icon (START), as on the Xbox controllers since the One; \x03
+ * sliders, the options. Digits and F P S for the frame rate counter. */
 #define MAX_SEGS 10
 typedef struct { char c; int n; float s[MAX_SEGS][4]; } Glyph;
 static const Glyph k_glyphs[] = {
@@ -200,6 +223,21 @@ static const Glyph k_glyphs[] = {
     { '\x01', 8, { {0,2,2.6f,2}, {2.6f,2,2.6f,6}, {2.6f,6,0,6}, {0,6,0,2},
                    {1.4f,0,4,0}, {4,0,4,4}, {4,4,2.6f,4}, {1.4f,0,1.4f,2} } },
     { '\x02', 3, { {0,1,4,1}, {0,3,4,3}, {0,5,4,5} } },
+    { '\x03', 6, { {0,1,4,1}, {0,3,4,3}, {0,5,4,5}, {1.2f,0.2f,1.2f,1.8f}, {2.9f,2.2f,2.9f,3.8f}, {1.8f,4.2f,1.8f,5.8f} } },
+    { '0', 4, { {0,0,4,0}, {4,0,4,6}, {4,6,0,6}, {0,6,0,0} } },
+    { '1', 2, { {0.8f,1.2f,2.2f,0}, {2.2f,0,2.2f,6} } },
+    { '2', 5, { {0,0,4,0}, {4,0,4,3}, {4,3,0,3}, {0,3,0,6}, {0,6,4,6} } },
+    { '3', 4, { {0,0,4,0}, {4,0,4,6}, {4,6,0,6}, {0.8f,3,4,3} } },
+    { '4', 3, { {0,0,0,3.6f}, {0,3.6f,4,3.6f}, {3,0,3,6} } },
+    { '5', 5, { {4,0,0,0}, {0,0,0,3}, {0,3,4,3}, {4,3,4,6}, {4,6,0,6} } },
+    { '6', 5, { {4,0,0,0}, {0,0,0,6}, {0,6,4,6}, {4,6,4,3}, {4,3,0,3} } },
+    { '7', 2, { {0,0,4,0}, {4,0,1.6f,6} } },
+    { '8', 5, { {0,0,4,0}, {4,0,4,6}, {4,6,0,6}, {0,6,0,0}, {0,3,4,3} } },
+    { '9', 5, { {4,3,0,3}, {0,3,0,0}, {0,0,4,0}, {4,0,4,6}, {4,6,0,6} } },
+    { 'F', 3, { {0,0,0,6}, {0,0,4,0}, {0,3,3,3} } },
+    { 'P', 6, { {0,6,0,0}, {0,0,2.8f,0}, {2.8f,0,3.8f,1}, {3.8f,1,3.8f,2}, {3.8f,2,2.8f,3}, {2.8f,3,0,3} } },
+    { 'S', 10, { {3.6f,0.4f,3,0}, {3,0,1,0}, {1,0,0,1}, {0,1,0,2}, {0,2,1,3}, {1,3,3,3}, {3,3,4,4}, {4,4,4,5},
+                 {4,5,3,6}, {3,6,0.4f,6} } },
 };
 #define NGLYPHS ((int)(sizeof k_glyphs / sizeof k_glyphs[0]))
 
@@ -328,12 +366,18 @@ static void text(const char *s, float cx, float cy, float h, float r, float g, f
 /* The controls over the frame. Called by the renderer with the drawable size. */
 void touch_draw(int w, int h)
 {
+    static Uint32 t0;
+    static int frames, fps;
     Uint32 now = SDL_GetTicks();
     float H = (float)h, lw = H * 0.0035f, sh_soft = H * 0.02f, sh_dy = H * 0.006f;
-    int i;
-    if (!g_touch_active) return;
-    /* A real controller in use since the last touch: hide the controls. */
-    if (s_last_pad > s_last_touch && now - s_last_pad < 100000) return;
+    int i, controls, counter = d3d8_GetShowFps();
+    /* The frame rate: shown frames, over a second. */
+    frames++;
+    if (!t0) t0 = now;
+    if (now - t0 >= 1000u) { fps = (int)(frames * 1000u / (now - t0)); frames = 0; t0 = now; }
+    /* A real controller in use since the last touch: no controls. */
+    controls = g_touch_active && !(s_last_pad > s_last_touch && now - s_last_pad < 100000);
+    if (!controls && !counter) return;
     if (!draw_init()) return;
     s_screen_w = w; s_screen_h = h;
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -346,6 +390,15 @@ void touch_draw(int w, int h)
     glUseProgram(s_prog);
     glBindVertexArray(s_vao);
     glUniform2f(s_u_screen, (float)w, (float)h);
+
+    if (counter) {
+        char t[16];
+        float cx = w * 0.5f + COUNTER_X * H, cy = 0.075f * H;
+        snprintf(t, sizeof t, "%d FPS", fps);
+        shape(cx, cy, 0.075f * H, 0.03f * H, 0.03f * H, 0, 0.07f, 0.08f, 0.10f, 0.55f, 0, 0, 0, 0, 0);
+        text(t, cx, cy, 0.026f * H, 0.92f, 0.93f, 0.95f, 0.95f);
+    }
+    if (!controls) goto done;
 
     for (i = 0; i < NBUTTONS; i++) {
         const Button *b = &k_buttons[i];
@@ -384,6 +437,7 @@ void touch_draw(int w, int h)
         shape(ox + dx, oy + dy, k, k, k, 0, 0.90f, 0.91f, 0.94f, s_stick_on ? 0.90f : 0.30f,
               lw, 1, 1, 1, s_stick_on ? 0.95f : 0.35f);
     }
+done:
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_BLEND);
 }

@@ -35,6 +35,12 @@ void d3d8_SetPresentOverlay(void (*fn)(int w, int h));
 /* On-screen controls (touch_sdl.c). */
 void touch_event(const SDL_Event *e, int screen_w, int screen_h);
 void touch_draw(int w, int h);
+int  touch_take_options(void);
+#include "fps_cap.h"
+int  d3d8_monitor_hz(HWND hwnd);
+void d3d8_SetShowFps(int on);
+int  d3d8_GetShowFps(void);
+void d3d8_SetHostPaused(int paused);
 void d3d8_SetHostWindow(void *sdl_window);
 void d3d8_GlesWindowHints(void);
 int  d3d8_HostKey(unsigned vk);
@@ -121,6 +127,39 @@ static int java_open_disc(int forget, long long *offset)
 #endif
 
 static int host_message_box(const char *text, const char *caption, UINT type);
+
+#ifdef __ANDROID__
+/* OpenTrickyActivity.options: the graphics options over the paused game.
+ * The frame rate switches at once (fps_cap_set), the counter too; both are
+ * kept in settings.ini (FrameRateLimit, ShowFps). */
+static void options_open(void)
+{
+    JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
+    jobject act = (jobject)SDL_AndroidGetActivity();
+    int hz = d3d8_monitor_hz(NULL), cur = fps_cap_current(), r = -1;
+    if (!env || !act) return;
+    jclass c = (*env)->GetObjectClass(env, act);
+    jmethodID m = (*env)->GetStaticMethodID(env, c, "options", "(IIZ)I");
+    d3d8_SetHostPaused(1);
+    if (m) r = (*env)->CallStaticIntMethod(env, c, m, (jint)cur, (jint)hz, (jboolean)(d3d8_GetShowFps() ? JNI_TRUE : JNI_FALSE));
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); r = -1; }
+    (*env)->DeleteLocalRef(env, c);
+    (*env)->DeleteLocalRef(env, act);
+    d3d8_SetHostPaused(0);
+    if (r >= 0) {
+        LauncherConfig cfg;
+        int fps = r & 0xFFFF, counter = (r >> 16) & 1;
+        d3d8_SetShowFps(counter);
+        if (!fps_cap_set(fps) && fps != cur)
+            host_message_box("The new frame rate applies from the next start.", "SSX Tricky", 0x40);
+        launcher_config_load(&cfg);
+        cfg.fps_cap = fps > 61 ? -2 : 60;           /* -2: the screen's rate (FrameRateLimit=monitor) */
+        cfg.show_fps = counter;
+        if (!launcher_config_save(&cfg)) fprintf(stderr, "Could not save the options\n");
+        printf("Options:    frame rate %d, counter %s\n", fps, counter ? "on" : "off");
+    }
+}
+#endif
 
 BOOL host_launcher_run(struct LauncherConfig *cfg)
 {
@@ -400,6 +439,7 @@ int host_run(int (*game_main)(void))
      * widescreen menus (Menus=16:9) rather than 4:3 ones between wide bars.
      * Races fill the screen either way (ScreenShape=auto). */
     setenv("XBOX_WIDE_MENUS", "16:9", 0);
+    setenv("XBOX_FPS_CAP_LIVE", "1", 0);          /* the options switch 60 / 120 while playing */
     {   /* Android drops stdout and stderr: everything goes to the log in the
          * app's folder, replaced at each start, for bug reports. */
         char log[1100];
@@ -473,6 +513,12 @@ int host_run(int (*game_main)(void))
             SDL_GL_GetDrawableSize(s_win, &dw, &dh);
             touch_event(&e, dw, dh);
         }
+#ifdef __ANDROID__
+        if (touch_take_options() || (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_AC_BACK && !e.key.repeat)) {
+            options_open();
+            continue;
+        }
+#endif
         switch (e.type) {
         case SDL_QUIT:
             fflush(stdout);

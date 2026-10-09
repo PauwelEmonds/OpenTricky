@@ -68,4 +68,6 @@ android/app/.cxx/
 android/build/
 android/local.properties
 *.apk
+OpenTricky-android*.zip
+*.iso
 linux-gles-race-start.png

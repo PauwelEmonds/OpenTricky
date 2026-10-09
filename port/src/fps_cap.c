@@ -796,12 +796,33 @@ static void trace_render(uint32_t race, double t0, double t1, const float *cam, 
     trace_flush();
 }
 
+/* Live switching (fps_cap_set): s_off = the cap is 60 now, every hook does
+ * what the original does; s_req a cap asked for, applied by the game thread
+ * in the frame wait. */
+static volatile int s_off, s_req = -1;
+static int s_hz;
+
+int fps_cap_set(int cap)
+{
+    if (!g_fps_cap_on) return 0;            /* hooks not installed: from the next start */
+    if (cap < 0 || cap > 1000 || (cap > 0 && cap < 60)) cap = 60;
+    if (cap == 0 || cap > s_hz) cap = s_hz > 61 ? s_hz : 60;   /* no more than the screen shows */
+    s_req = cap;
+    return 1;
+}
+
+int fps_cap_current(void)
+{
+    return !g_fps_cap_on || s_off ? 60 : s.cap;
+}
+
 static void hook_AB610(void)
 {
     uint32_t state = g_ecx, app = MEM32(APP_GLOBAL), sv_eax, sv_ecx, sv_edx;
     double t0 = now_ms();
     int k;
     double t_in;
+    if (s_off) { sub_000AB610(); return; }
     interp_begin(state);
     if (s_trace && GetCurrentThreadId() == s.tid) {
         /* position as the render sees it (interpolated or tick N) */
@@ -857,6 +878,26 @@ static void hook_B2750(void)
 {
     uint32_t self = g_ecx, app = MEM32(APP_GLOBAL), handle, r;
     double t;
+
+    if (s_req >= 0) {                       /* fps_cap_set */
+        int cap = s_req;
+        s_req = -1;
+        if (cap == 60) s_off = 1;
+        else {
+            s.cap = cap;
+            s.period_ms = 1000.0 / cap;
+            s.last_tick_ret = now_ms();     /* pacing from now, not from before the switch */
+            s.next_render = s.last_tick_ret + s.period_ms;
+            I.ok = 0;
+            s_off = 0;
+        }
+        fprintf(stderr, "[FPSCAP] cap now %d\n", cap);
+    }
+    if (s_off) {
+        g_ecx = self;
+        sub_000B2750();
+        return;
+    }
 
     P.hook_calls++;
     {
@@ -962,6 +1003,7 @@ static void hook_AD4A0(void)
     double t = now_ms();
     int pre = 0;
     if (I.written) interp_end();     /* to be safe: never a tick on an interpolated state */
+    if (s_off) { I.ok = 0; sub_000AD4A0(); return; }
     if (I.on && vs_layout(&I.pre, st)) { vs_read(&I.pre); pre = 1; }
     sub_000AD4A0();
     if (I.on) {
@@ -1048,6 +1090,14 @@ void fps_cap_init(void)
         cap = hz > 61 && hz <= 1000 ? hz : 60;
         fprintf(stderr, "[FPSCAP] XBOX_SYNC=%s: cap %d lowered to the display (%d Hz) -> %d\n", sy, was, hz, cap);
     }
+    /* XBOX_FPS_CAP_LIVE=1 (the Android host's options): the hooks are
+     * installed on a screen above 60 Hz even at 60, so fps_cap_set can
+     * switch while playing. */
+    s_hz = hz;
+    if (cap == 60 && (e = getenv("XBOX_FPS_CAP_LIVE")) && e[0] == '1' && hz > 61 && hz <= 1000) {
+        s_off = 1;
+        cap = hz;
+    }
     if (cap == 60) return;    /* default: hook not installed */
     QueryPerformanceFrequency(&f);
     s.freq = (double)f.QuadPart;
@@ -1081,9 +1131,9 @@ void fps_cap_init(void)
     P.t0 = s_t0_run = now_ms();
     g_fps_cap_on = 1;
     atexit(fps_cap_atexit);
-    fprintf(stderr, "[FPSCAP] cap %d%s (%s; logic 60 Hz)%s\n",
-            cap, cap ? " fps" : " = no limit", I.on ? "camera + riders interpolation" : "duplicates without a tick",
-            s.check ? "; state probe active" : "");
+    fprintf(stderr, "[FPSCAP] cap %d%s (%s; logic 60 Hz)%s%s\n",
+            s_off ? 60 : cap, cap ? " fps" : " = no limit", I.on ? "camera + riders interpolation" : "duplicates without a tick",
+            s.check ? "; state probe active" : "", s_off ? "; live switching up to the screen's rate" : "");
 }
 
 void (*fps_cap_lookup(unsigned int xbox_va))(void)

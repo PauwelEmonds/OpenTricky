@@ -93,6 +93,14 @@ the build does. The APK must stay under 4 GB, so a full 7-8 GB dump needs
 trimming first (`extract-xiso -r`); installing needs about twice the APK's
 size free for a moment. The result has your game in it: keep it to yourself.
 
+The sliders button at the top of the touch controls (or the phone's Back)
+opens the graphics options over the paused game: the frame rate, 60 (as on
+the Xbox) or the screen's own rate (120 on a 120 Hz phone), switched while
+playing, and a frame rate counter. Both are kept in `settings.ini`
+(`FrameRateLimit`, `ShowFrameRate`). The frame pacing hooks are installed on
+a screen above 60 Hz even at 60 so the switch needs no restart
+(`XBOX_FPS_CAP_LIVE=1`, set by the Android host).
+
 Phones get the game's own 16:9 menus (the `Menus` setting, forced by
 `XBOX_WIDE_MENUS=16:9`); races fill the whole screen.
 

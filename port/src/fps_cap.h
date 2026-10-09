@@ -75,6 +75,10 @@
 extern int g_fps_cap_on;
 
 void fps_cap_init(void);
+/* While playing: the cap (60 = the original pacing; above the screen's rate,
+ * the screen's). 0 when the hooks are not installed (XBOX_FPS_CAP_LIVE). */
+int  fps_cap_set(int cap);
+int  fps_cap_current(void);             /* 60 when off */
 void (*fps_cap_lookup(unsigned int xbox_va))(void);
 
 #endif
