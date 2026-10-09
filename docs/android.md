@@ -82,6 +82,20 @@ The first start opens the system's file picker: choose your **SSX Tricky
 remembered. A controller works as on PC; without one, on-screen controls
 appear at the first touch.
 
+Or put the image into the APK, so the phone needs no picking: on Windows,
+drag the `.iso` onto `pack_iso.bat` (or run
+`pack_iso.bat "SSX Tricky (USA).iso" [in.apk] [out.apk]`). It writes
+`OpenTricky-android-SSX-Tricky.apk` beside `OpenTricky-android-debug.apk`,
+the image stored uncompressed as `assets/game.iso` (read straight out of the
+installed APK), aligned and signed with the same debug key, so it installs
+over the plain one. It needs the Android SDK build-tools and a JDK 11+, as
+the build does. The APK must stay under 4 GB, so a full 7-8 GB dump needs
+trimming first (`extract-xiso -r`); installing needs about twice the APK's
+size free for a moment. The result has your game in it: keep it to yourself.
+
+Phones get the game's own 16:9 menus (the `Menus` setting, forced by
+`XBOX_WIDE_MENUS=16:9`); races fill the whole screen.
+
 Files (settings, saves, log, screenshots) are in the app's folder,
 `Android/data/io.github.opentricky.ssxtricky/files/`, which a USB cable
 reaches. `settings.ini` there takes the same settings as on Windows (the file

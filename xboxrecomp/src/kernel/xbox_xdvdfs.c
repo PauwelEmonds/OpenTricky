@@ -27,6 +27,7 @@ static const uint64_t s_base_candidates[] = {
 
 static FILE    *s_iso        = NULL;
 static uint64_t s_base       = 0;
+static uint64_t s_origin     = 0;   /* where the image starts in the file ("fd:N@OFFSET") */
 static uint32_t s_root_sec   = 0;
 static uint32_t s_root_size  = 0;
 static CRITICAL_SECTION s_cs;   /* the title reads the disc from several threads */
@@ -38,7 +39,7 @@ static BOOL raw_read(uint64_t offset, void *buf, uint32_t len)
 {
     size_t got;
     if (!s_iso) return FALSE;
-    if (_fseeki64(s_iso, (long long)(s_base + offset), SEEK_SET) != 0)
+    if (_fseeki64(s_iso, (long long)(s_origin + s_base + offset), SEEK_SET) != 0)
         return FALSE;
     got = fread(buf, 1, len, s_iso);
     return got == len;
@@ -234,9 +235,13 @@ BOOL xdvdfs_mount(const char *iso_path)
 
 #ifndef _WIN32
     /* "fd:N": an open file descriptor -- on Android the system's file picker
-     * hands the disc image over that way (a content URI, not a path). */
+     * hands the disc image over that way (a content URI, not a path).
+     * "fd:N@OFFSET": the image starts OFFSET bytes into that file -- one
+     * stored in the APK (android/pack_iso.bat), N the APK itself. */
     if (!strncmp(iso_path, "fd:", 3)) {
+        const char *at = strchr(iso_path, '@');
         int fd = dup(atoi(iso_path + 3));
+        if (at) s_origin = strtoull(at + 1, NULL, 10);
         s_iso = fd >= 0 ? fdopen(fd, "rb") : NULL;
     } else
 #endif
@@ -275,7 +280,7 @@ void xdvdfs_unmount(void)
 {
     if (s_iso) { fclose(s_iso); s_iso = NULL; }
     s_root_sec = s_root_size = 0;
-    s_base = 0;
+    s_base = s_origin = 0;
 }
 
 BOOL xdvdfs_find(const char *rel_path, uint32_t *out_sector,

@@ -9,8 +9,10 @@
  * host_sdl.c merges with a real controller (g_touch_pad).
  *
  * Drawn by the renderer after the game image, on its thread, through
- * d3d8_SetPresentOverlay (OpenGL ES 3). The controls fade out while a real
- * controller is in use and come back at the next touch.
+ * d3d8_SetPresentOverlay (OpenGL ES 3), as distance fields: round, soft-
+ * shadowed buttons with sharp vector labels at any screen density. The
+ * controls hide while a real controller is in use and come back at the
+ * next touch.
  */
 #ifndef _WIN32
 
@@ -24,32 +26,39 @@
 extern XINPUT_GAMEPAD g_touch_pad;
 extern volatile int   g_touch_active;
 
-typedef enum { SH_CIRCLE, SH_RECT } Shape;
+typedef enum { AN_LEFT, AN_RIGHT, AN_CENTRE } Anchor;
 typedef struct {
-    const char *label;
-    Shape shape;
-    float x, y, w, h;           /* centre and size; x in screen heights from the edge (see place) */
-    int   right;                /* anchored to the right edge */
+    const char *label;          /* letters, or \x01 View (BACK) / \x02 Menu (START): the glyphs below */
+    int   round;                /* a circle; else a pill */
+    float x, y, w, h;           /* centre and size in screen heights; x from the anchor's edge (centre: offset) */
+    Anchor anchor;
     WORD  bit;                  /* XINPUT_GAMEPAD_* */
     int   trigger;              /* 1 left, 2 right */
-    float r, g, b;
+    float r, g, b;              /* accent: rim, letter and pressed fill */
 } Button;
 
 /* Positions in units of the screen height, so the controls keep their size
- * and shape on any aspect ratio. */
+ * and shape on any aspect ratio: A B X Y as a diamond on the right, the
+ * triggers over the bumpers in the top corners, View and Menu (BACK, START)
+ * at the top middle. */
 static const Button k_buttons[] = {
-    { "A",     SH_CIRCLE, 0.17f, 0.82f, 0.15f, 0.15f, 1, XINPUT_GAMEPAD_A, 0, 0.30f, 0.80f, 0.25f },
-    { "B",     SH_CIRCLE, 0.06f, 0.68f, 0.15f, 0.15f, 1, XINPUT_GAMEPAD_B, 0, 0.90f, 0.25f, 0.20f },
-    { "X",     SH_CIRCLE, 0.28f, 0.68f, 0.15f, 0.15f, 1, XINPUT_GAMEPAD_X, 0, 0.25f, 0.45f, 0.95f },
-    { "Y",     SH_CIRCLE, 0.17f, 0.54f, 0.15f, 0.15f, 1, XINPUT_GAMEPAD_Y, 0, 0.95f, 0.80f, 0.20f },
-    { "LT",    SH_RECT,   0.14f, 0.09f, 0.22f, 0.12f, 0, 0, 1, 0.80f, 0.80f, 0.80f },
-    { "RT",    SH_RECT,   0.14f, 0.09f, 0.22f, 0.12f, 1, 0, 2, 0.80f, 0.80f, 0.80f },
-    { "LB",    SH_RECT,   0.14f, 0.24f, 0.18f, 0.10f, 0, XINPUT_GAMEPAD_LEFT_SHOULDER, 0, 0.95f, 0.95f, 0.95f },
-    { "RB",    SH_RECT,   0.14f, 0.24f, 0.18f, 0.10f, 1, XINPUT_GAMEPAD_RIGHT_SHOULDER, 0, 0.30f, 0.30f, 0.30f },
-    { "BACK",  SH_RECT,   0.50f, 0.07f, 0.20f, 0.08f, 0, XINPUT_GAMEPAD_BACK, 0, 0.60f, 0.60f, 0.60f },
-    { "START", SH_RECT,   0.50f, 0.07f, 0.20f, 0.08f, 1, XINPUT_GAMEPAD_START, 0, 0.60f, 0.60f, 0.60f },
+    { "A",    1, 0.21f, 0.80f, 0.135f, 0.135f, AN_RIGHT,  XINPUT_GAMEPAD_A, 0, 0.42f, 0.84f, 0.29f },
+    { "B",    1, 0.10f, 0.69f, 0.135f, 0.135f, AN_RIGHT,  XINPUT_GAMEPAD_B, 0, 0.96f, 0.36f, 0.33f },
+    { "X",    1, 0.32f, 0.69f, 0.135f, 0.135f, AN_RIGHT,  XINPUT_GAMEPAD_X, 0, 0.29f, 0.58f, 0.98f },
+    { "Y",    1, 0.21f, 0.58f, 0.135f, 0.135f, AN_RIGHT,  XINPUT_GAMEPAD_Y, 0, 0.99f, 0.80f, 0.25f },
+    { "LT",   0, 0.17f, 0.09f, 0.21f, 0.095f, AN_LEFT,   0, 1, 0.92f, 0.93f, 0.95f },
+    { "RT",   0, 0.17f, 0.09f, 0.21f, 0.095f, AN_RIGHT,  0, 2, 0.92f, 0.93f, 0.95f },
+    { "LB",   0, 0.17f, 0.21f, 0.18f, 0.085f, AN_LEFT,   XINPUT_GAMEPAD_LEFT_SHOULDER, 0, 0.92f, 0.93f, 0.95f },
+    { "RB",   0, 0.17f, 0.21f, 0.18f, 0.085f, AN_RIGHT,  XINPUT_GAMEPAD_RIGHT_SHOULDER, 0, 0.92f, 0.93f, 0.95f },
+    { "\x01", 1, -0.075f, 0.075f, 0.085f, 0.085f, AN_CENTRE, XINPUT_GAMEPAD_BACK, 0, 0.92f, 0.93f, 0.95f },
+    { "\x02", 1, 0.075f, 0.075f, 0.085f, 0.085f, AN_CENTRE, XINPUT_GAMEPAD_START, 0, 0.92f, 0.93f, 0.95f },
 };
 #define NBUTTONS ((int)(sizeof k_buttons / sizeof k_buttons[0]))
+
+/* The stick's resting place (shown faintly until a thumb lands), its reach. */
+#define STICK_X 0.25f
+#define STICK_Y 0.70f
+#define STICK_R 0.12f
 
 #define MAX_FINGERS 10
 static struct {
@@ -68,9 +77,8 @@ static int s_screen_w = 1, s_screen_h = 1;
 static void place(const Button *b, float *x0, float *y0, float *x1, float *y1)
 {
     float H = (float)s_screen_h, cx = b->x * H, cy = b->y * H;
-    if (b->label[0] == 'B' && b->label[1] == 'A') cx = s_screen_w * 0.5f - 0.13f * H;      /* BACK  */
-    else if (b->label[0] == 'S') cx = s_screen_w * 0.5f + 0.13f * H;                        /* START */
-    else if (b->right) cx = s_screen_w - cx;
+    if (b->anchor == AN_CENTRE) cx += s_screen_w * 0.5f;
+    else if (b->anchor == AN_RIGHT) cx = s_screen_w - cx;
     *x0 = cx - b->w * H * 0.5f; *x1 = cx + b->w * H * 0.5f;
     *y0 = cy - b->h * H * 0.5f; *y1 = cy + b->h * H * 0.5f;
 }
@@ -98,7 +106,7 @@ static void publish(void)
         if (k_buttons[i].trigger == 2) g.bRightTrigger = 255;
     }
     if (s_stick_on) {
-        float R = s_screen_h * 0.12f, dx = (s_stick_x - s_stick_ox) / R, dy = (s_stick_y - s_stick_oy) / R;
+        float R = s_screen_h * STICK_R, dx = (s_stick_x - s_stick_ox) / R, dy = (s_stick_y - s_stick_oy) / R;
         float len = sqrtf(dx * dx + dy * dy);
         if (len > 1.0f) { dx /= len; dy /= len; }
         g.sThumbLX = (SHORT)(dx * 32767.0f);
@@ -174,46 +182,73 @@ void touch_event(const SDL_Event *e, int screen_w, int screen_h)
 
 /* ---- drawing (render thread) ----------------------------------------------- */
 
-/* 5x7 glyphs for the labels: A B C K L R S T X Y. */
-static const struct { char c; unsigned char row[7]; } k_font[] = {
-    { 'A', { 0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11 } },
-    { 'B', { 0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E } },
-    { 'C', { 0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E } },
-    { 'K', { 0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11 } },
-    { 'L', { 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F } },
-    { 'R', { 0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11 } },
-    { 'S', { 0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E } },
-    { 'T', { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 } },
-    { 'X', { 0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11 } },
-    { 'Y', { 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04 } },
+/* The labels as strokes on a 4 x 6 grid (y down), drawn as distance fields:
+ * sharp at any size, with round ends. \x01 is the View icon (BACK), \x02
+ * the Menu icon (START), as on the Xbox controllers since the One. */
+#define MAX_SEGS 10
+typedef struct { char c; int n; float s[MAX_SEGS][4]; } Glyph;
+static const Glyph k_glyphs[] = {
+    { 'A', 3, { {0,6,2,0}, {2,0,4,6}, {0.75f,3.9f,3.25f,3.9f} } },
+    { 'B', 10, { {0,0,0,6}, {0,0,2.6f,0}, {2.6f,0,3.5f,0.9f}, {3.5f,0.9f,3.5f,2.1f}, {3.5f,2.1f,2.6f,3},
+                 {0,3,2.8f,3}, {2.8f,3,3.9f,4}, {3.9f,4,3.9f,5}, {3.9f,5,2.9f,6}, {2.9f,6,0,6} } },
+    { 'X', 2, { {0,0,4,6}, {4,0,0,6} } },
+    { 'Y', 3, { {0,0,2,3}, {4,0,2,3}, {2,3,2,6} } },
+    { 'L', 2, { {0,0,0,6}, {0,6,3.6f,6} } },
+    { 'R', 7, { {0,6,0,0}, {0,0,2.7f,0}, {2.7f,0,3.7f,1}, {3.7f,1,3.7f,2}, {3.7f,2,2.7f,3}, {2.7f,3,0,3},
+                {2.1f,3,3.9f,6} } },
+    { 'T', 2, { {0,0,4,0}, {2,0,2,6} } },
+    { '\x01', 8, { {0,2,2.6f,2}, {2.6f,2,2.6f,6}, {2.6f,6,0,6}, {0,6,0,2},
+                   {1.4f,0,4,0}, {4,0,4,4}, {4,4,2.6f,4}, {1.4f,0,1.4f,2} } },
+    { '\x02', 3, { {0,1,4,1}, {0,3,4,3}, {0,5,4,5} } },
 };
-#define NGLYPHS ((int)(sizeof k_font / sizeof k_font[0]))
+#define NGLYPHS ((int)(sizeof k_glyphs / sizeof k_glyphs[0]))
 
-static GLuint s_prog, s_font, s_vao, s_vbo;
-static GLint  s_u_rect, s_u_color, s_u_mode, s_u_screen, s_u_uv;
+static GLuint s_prog, s_vao;
+static GLint  s_u_rect, s_u_screen, s_u_mode, s_u_fill, s_u_line, s_u_lw, s_u_rad, s_u_soft, s_u_seg, s_u_nseg, s_u_sw;
 
 static const char k_vs[] =
     "#version 300 es\n"
-    "uniform vec4 u_rect; uniform vec2 u_screen; uniform vec4 u_uv;\n"
-    "out vec2 v_p; out vec2 v_uv;\n"
+    "uniform vec4 u_rect; uniform vec2 u_screen;\n"
+    "out vec2 v_px;\n"                                   /* pixels from the rectangle's centre */
     "void main() {\n"
     "    vec2 c = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));\n"
     "    vec2 p = mix(u_rect.xy, u_rect.zw, c);\n"
-    "    v_p = c * 2.0 - 1.0; v_uv = mix(u_uv.xy, u_uv.zw, c);\n"
+    "    v_px = p - (u_rect.xy + u_rect.zw) * 0.5;\n"
     "    gl_Position = vec4(p.x / u_screen.x * 2.0 - 1.0, 1.0 - p.y / u_screen.y * 2.0, 0.0, 1.0);\n"
     "}\n";
+/* mode 0: a rounded box (a circle when the radius is half its size), filled
+ * with a little light from above, with a rim; u_soft blurs the edge (shadows).
+ * mode 1: a glyph, the segments u_seg in pixels from the centre.
+ * Output premultiplied. */
 static const char k_fs[] =
     "#version 300 es\n"
-    "precision mediump float;\n"
-    "uniform vec4 u_color; uniform int u_mode; uniform sampler2D u_font;\n"
-    "in vec2 v_p; in vec2 v_uv; out vec4 o;\n"
+    "precision highp float;\n"
+    "uniform vec4 u_rect; uniform int u_mode; uniform vec4 u_fill; uniform vec4 u_line;\n"
+    "uniform float u_lw; uniform float u_rad; uniform float u_soft;\n"
+    "uniform vec4 u_seg[10]; uniform int u_nseg; uniform float u_sw;\n"
+    "in vec2 v_px; out vec4 o;\n"
+    "float seg(vec2 p, vec2 a, vec2 b) {\n"
+    "    vec2 pa = p - a, ba = b - a;\n"
+    "    return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0));\n"
+    "}\n"
     "void main() {\n"
-    "    float a;\n"
-    "    if (u_mode == 0) { float d = length(v_p); a = smoothstep(1.0, 0.92, d); }\n"   /* disc */
-    "    else if (u_mode == 1) { vec2 q = abs(v_p); a = smoothstep(1.0, 0.94, max(q.x, q.y)); }\n"  /* box */
-    "    else if (u_mode == 2) { float d = length(v_p); a = smoothstep(1.0, 0.94, d) * smoothstep(0.86, 0.92, d); }\n"  /* ring */
-    "    else a = texture(u_font, v_uv).r;\n"   /* glyph */
-    "    o = vec4(u_color.rgb, u_color.a * a);\n"
+    "    if (u_mode == 0) {\n"
+    "        vec2 half_ = (u_rect.zw - u_rect.xy) * 0.5 - vec2(u_soft);\n"
+    "        vec2 q = abs(v_px) - half_ + u_rad;\n"
+    "        float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - u_rad;\n"
+    "        float aa = max(u_soft, 1.0);\n"
+    "        float inside = 1.0 - smoothstep(-0.5 * aa, 0.5 * aa, d);\n"
+    "        float rim = u_lw > 0.0 ? clamp(0.5 - (abs(d + u_lw * 0.5) - u_lw * 0.5), 0.0, 1.0) : 0.0;\n"
+    "        vec3 f = u_fill.rgb + 0.07 * clamp(-v_px.y / half_.y, -1.0, 1.0);\n"
+    "        vec4 base = vec4(f * u_fill.a, u_fill.a) * inside;\n"
+    "        vec4 line = vec4(u_line.rgb * u_line.a, u_line.a) * rim;\n"
+    "        o = line + base * (1.0 - line.a);\n"
+    "    } else {\n"
+    "        float d = 1e9;\n"
+    "        for (int i = 0; i < u_nseg; i++) d = min(d, seg(v_px, u_seg[i].xy, u_seg[i].zw));\n"
+    "        float a = clamp(0.5 - (d - u_sw * 0.5), 0.0, 1.0);\n"
+    "        o = vec4(u_fill.rgb * u_fill.a, u_fill.a) * a;\n"
+    "    }\n"
     "}\n";
 
 static GLuint sh(GLenum t, const char *src)
@@ -229,8 +264,6 @@ static GLuint sh(GLenum t, const char *src)
 
 static int draw_init(void)
 {
-    unsigned char px[NGLYPHS * 6 * 7];
-    int g, x, y;
     GLuint v, f;
     if (s_prog) return 1;
     v = sh(GL_VERTEX_SHADER, k_vs); f = sh(GL_FRAGMENT_SHADER, k_fs);
@@ -239,43 +272,56 @@ static int draw_init(void)
     glLinkProgram(s_prog);
     glDeleteShader(v); glDeleteShader(f);
     s_u_rect = glGetUniformLocation(s_prog, "u_rect");
-    s_u_color = glGetUniformLocation(s_prog, "u_color");
-    s_u_mode = glGetUniformLocation(s_prog, "u_mode");
     s_u_screen = glGetUniformLocation(s_prog, "u_screen");
-    s_u_uv = glGetUniformLocation(s_prog, "u_uv");
-    memset(px, 0, sizeof px);
-    for (g = 0; g < NGLYPHS; g++)
-        for (y = 0; y < 7; y++)
-            for (x = 0; x < 5; x++)
-                if (k_font[g].row[y] & (0x10 >> x)) px[y * NGLYPHS * 6 + g * 6 + x] = 255;
-    glGenTextures(1, &s_font);
-    glBindTexture(GL_TEXTURE_2D, s_font);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, NGLYPHS * 6, 7, 0, GL_RED, GL_UNSIGNED_BYTE, px);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    s_u_mode = glGetUniformLocation(s_prog, "u_mode");
+    s_u_fill = glGetUniformLocation(s_prog, "u_fill");
+    s_u_line = glGetUniformLocation(s_prog, "u_line");
+    s_u_lw = glGetUniformLocation(s_prog, "u_lw");
+    s_u_rad = glGetUniformLocation(s_prog, "u_rad");
+    s_u_soft = glGetUniformLocation(s_prog, "u_soft");
+    s_u_seg = glGetUniformLocation(s_prog, "u_seg");
+    s_u_nseg = glGetUniformLocation(s_prog, "u_nseg");
+    s_u_sw = glGetUniformLocation(s_prog, "u_sw");
     glGenVertexArrays(1, &s_vao);
-    (void)s_vbo;
     return 1;
 }
 
-static void quad(int mode, float x0, float y0, float x1, float y1, float r, float g, float b, float a)
+/* A rounded box around (cx, cy), half-size hw x hh, corner radius rad; soft
+ * blurs it by that many pixels (drawn that much larger). */
+static void shape(float cx, float cy, float hw, float hh, float rad, float soft,
+                  float fr, float fg, float fb, float fa, float lw, float lr, float lg, float lb, float la)
 {
-    glUniform4f(s_u_rect, x0, y0, x1, y1);
-    glUniform4f(s_u_color, r, g, b, a);
-    glUniform1i(s_u_mode, mode);
+    glUniform1i(s_u_mode, 0);
+    glUniform4f(s_u_rect, cx - hw - soft, cy - hh - soft, cx + hw + soft, cy + hh + soft);
+    glUniform4f(s_u_fill, fr, fg, fb, fa);
+    glUniform4f(s_u_line, lr, lg, lb, la);
+    glUniform1f(s_u_lw, lw);
+    glUniform1f(s_u_rad, rad);
+    glUniform1f(s_u_soft, soft);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
-static void text(const char *s, float cx, float cy, float h, float a)
+/* A label centred on (cx, cy), h pixels high. */
+static void text(const char *s, float cx, float cy, float h, float r, float g, float b, float a)
 {
-    float gw = h * 5.0f / 7.0f, adv = h * 6.0f / 7.0f, x = cx - (adv * (float)strlen(s) - (adv - gw)) * 0.5f;
+    float u = h / 6.0f, sw = h * 0.15f, adv = 5.6f * u;
+    float x = cx - (adv * (float)(strlen(s) - 1) + 4.0f * u) * 0.5f;
+    glUniform1i(s_u_mode, 1);
+    glUniform4f(s_u_fill, r, g, b, a);
+    glUniform1f(s_u_sw, sw);
     for (; *s; s++, x += adv) {
-        int g;
-        for (g = 0; g < NGLYPHS && k_font[g].c != *s; g++) {}
-        if (g == NGLYPHS) continue;
-        glUniform4f(s_u_uv, (g * 6) / (float)(NGLYPHS * 6), 0.0f, (g * 6 + 5) / (float)(NGLYPHS * 6), 1.0f);
-        quad(3, x, cy - h * 0.5f, x + gw, cy + h * 0.5f, 1, 1, 1, a);
+        float seg[MAX_SEGS][4], gx = x + 2.0f * u;
+        int gi, i;
+        for (gi = 0; gi < NGLYPHS && k_glyphs[gi].c != *s; gi++) {}
+        if (gi == NGLYPHS) continue;
+        for (i = 0; i < k_glyphs[gi].n; i++) {          /* grid -> pixels from the glyph's centre */
+            seg[i][0] = (k_glyphs[gi].s[i][0] - 2.0f) * u; seg[i][1] = (k_glyphs[gi].s[i][1] - 3.0f) * u;
+            seg[i][2] = (k_glyphs[gi].s[i][2] - 2.0f) * u; seg[i][3] = (k_glyphs[gi].s[i][3] - 3.0f) * u;
+        }
+        glUniform4fv(s_u_seg, k_glyphs[gi].n, &seg[0][0]);
+        glUniform1i(s_u_nseg, k_glyphs[gi].n);
+        glUniform4f(s_u_rect, gx - 2.0f * u - sw, cy - 3.0f * u - sw, gx + 2.0f * u + sw, cy + 3.0f * u + sw);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
 }
 
@@ -283,41 +329,62 @@ static void text(const char *s, float cx, float cy, float h, float a)
 void touch_draw(int w, int h)
 {
     Uint32 now = SDL_GetTicks();
-    float fade;
+    float H = (float)h, lw = H * 0.0035f, sh_soft = H * 0.02f, sh_dy = H * 0.006f;
     int i;
     if (!g_touch_active) return;
-    /* A real controller in use since the last touch: fade the controls out. */
-    fade = (s_last_pad > s_last_touch && now - s_last_pad < 100000) ? 0.0f : 1.0f;
-    if (fade <= 0.0f) return;
+    /* A real controller in use since the last touch: hide the controls. */
+    if (s_last_pad > s_last_touch && now - s_last_pad < 100000) return;
     if (!draw_init()) return;
     s_screen_w = w; s_screen_h = h;
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, w, h);
     glDisable(GL_DEPTH_TEST); glDisable(GL_STENCIL_TEST); glDisable(GL_CULL_FACE); glDisable(GL_SCISSOR_TEST);
     glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);         /* premultiplied */
     glBlendEquation(GL_FUNC_ADD);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glUseProgram(s_prog);
     glBindVertexArray(s_vao);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, s_font);
-    glBindSampler(0, 0);
     glUniform2f(s_u_screen, (float)w, (float)h);
+
     for (i = 0; i < NBUTTONS; i++) {
         const Button *b = &k_buttons[i];
-        float x0, y0, x1, y1, a = (s_pressed & (1 << i)) ? 0.75f : 0.35f;
+        int down = (s_pressed & (1 << i)) != 0;
+        float x0, y0, x1, y1, cx, cy, hw, hh, rad, k = down ? 0.93f : 1.0f;
         place(b, &x0, &y0, &x1, &y1);
-        quad(b->shape == SH_CIRCLE ? 0 : 1, x0, y0, x1, y1, b->r, b->g, b->b, a);
-        text(b->label, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f, (y1 - y0) * 0.38f, 0.9f);
+        cx = (x0 + x1) * 0.5f; cy = (y0 + y1) * 0.5f;
+        hw = (x1 - x0) * 0.5f * k; hh = (y1 - y0) * 0.5f * k;
+        rad = b->round ? hw : hh;
+        if (!down)                                          /* a soft shadow: the button above the picture */
+            shape(cx, cy + sh_dy, hw, hh, rad, sh_soft, 0, 0, 0, 0.30f, 0, 0, 0, 0, 0);
+        if (down)
+            shape(cx, cy, hw, hh, rad, 0, b->r * 0.85f, b->g * 0.85f, b->b * 0.85f, 0.80f,
+                  lw, 1, 1, 1, 0.85f);
+        else
+            shape(cx, cy, hw, hh, rad, 0, 0.07f, 0.08f, 0.10f, 0.42f,
+                  lw, b->r, b->g, b->b, b->round && b->anchor != AN_CENTRE ? 0.90f : 0.45f);
+        text(b->label, cx, cy, (b->label[0] < 0x20 ? 0.36f : 0.40f) * hh * 2.0f / (b->label[1] ? 1.25f : 1.0f),
+             down ? 1.0f : b->r, down ? 1.0f : b->g, down ? 1.0f : b->b, 0.95f);
     }
-    if (s_stick_on) {
-        float R = h * 0.12f, k = h * 0.05f, dx = s_stick_x - s_stick_ox, dy = s_stick_y - s_stick_oy;
-        float len = sqrtf(dx * dx + dy * dy);
-        if (len > R) { dx = dx / len * R; dy = dy / len * R; }
-        quad(2, s_stick_ox - R, s_stick_oy - R, s_stick_ox + R, s_stick_oy + R, 1, 1, 1, 0.5f);
-        quad(0, s_stick_ox + dx - k, s_stick_oy + dy - k, s_stick_ox + dx + k, s_stick_oy + dy + k, 1, 1, 1, 0.6f);
+
+    {   /* the stick: where the thumb landed, or faintly at its usual place */
+        float R = H * STICK_R, k = H * 0.052f, ox, oy, dx = 0, dy = 0;
+        if (s_stick_on) {
+            float len;
+            ox = s_stick_ox; oy = s_stick_oy;
+            dx = s_stick_x - ox; dy = s_stick_y - oy;
+            len = sqrtf(dx * dx + dy * dy);
+            if (len > R) { dx = dx / len * R; dy = dy / len * R; }
+        } else {
+            ox = STICK_X * H; oy = STICK_Y * H;
+        }
+        shape(ox, oy, R, R, R, 0, 0.07f, 0.08f, 0.10f, s_stick_on ? 0.35f : 0.18f,
+              lw, 1, 1, 1, s_stick_on ? 0.45f : 0.22f);
+        shape(ox + dx, oy + dy + sh_dy, k, k, k, sh_soft, 0, 0, 0, s_stick_on ? 0.35f : 0.15f, 0, 0, 0, 0, 0);
+        shape(ox + dx, oy + dy, k, k, k, 0, 0.90f, 0.91f, 0.94f, s_stick_on ? 0.90f : 0.30f,
+              lw, 1, 1, 1, s_stick_on ? 0.95f : 0.35f);
     }
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_BLEND);
 }
 

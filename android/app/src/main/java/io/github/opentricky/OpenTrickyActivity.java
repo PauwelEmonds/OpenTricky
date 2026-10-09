@@ -1,6 +1,8 @@
 // OpenTrickyActivity - SDL's activity plus what the game needs from Android: the disc image, chosen once in the system's
 // file picker and remembered (a persistable permission on its content URI), handed to the game as a file descriptor it
 // keeps open and reads the disc from; and dialogs the game can block on.
+// An APK built with the image inside (android/pack_iso.bat: assets/game.iso, stored uncompressed) uses that one instead:
+// the descriptor is the APK's own, the image at discImageOffset() in it.
 // Testing: am start -n io.github.opentricky.ssxtricky/io.github.opentricky.OpenTrickyActivity
 //              -e args "--play" -e env "XBOX_FPS_LOG=1;XBOX_INPUT_AUTOPRESS=start@6"
 package io.github.opentricky;
@@ -9,6 +11,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.res.AssetFileDescriptor;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
@@ -21,6 +24,9 @@ public class OpenTrickyActivity extends SDLActivity {
     private static final String TAG = "OpenTricky";
     private static final int REQ_ISO = 0x0715;
     private static final String PREFS = "opentricky", KEY_ISO = "disc_image_uri";
+    private static final String PACKED_ISO = "game.iso";            // android/pack_iso.bat
+
+    private static volatile long sOffset;                           // of the image in the file openDiscImage returned
 
     private static final Object sLock = new Object();
     private static boolean sPicked;
@@ -54,6 +60,19 @@ public class OpenTrickyActivity extends SDLActivity {
     public static int openDiscImage(boolean forget) {
         final Activity a = (Activity) SDLActivity.getContext();
         if (a == null) return -2;
+        sOffset = 0;
+        if (!forget) {                                  // the image packed into the APK, if there is one
+            try (AssetFileDescriptor afd = a.getAssets().openFd(PACKED_ISO)) {
+                int fd = afd.getParcelFileDescriptor().dup().detachFd();
+                sOffset = afd.getStartOffset();
+                Log.i(TAG, "disc image packed in the APK: " + afd.getLength() + " bytes at " + sOffset);
+                return fd;
+            } catch (java.io.FileNotFoundException e) {
+                // none: the one chosen before, or the picker
+            } catch (Exception e) {
+                Log.w(TAG, "the disc image packed in the APK does not open", e);
+            }
+        }
         SharedPreferences p = a.getSharedPreferences(PREFS, 0);
         String saved = forget ? null : p.getString(KEY_ISO, null);
         if (saved != null) {
@@ -84,6 +103,11 @@ public class OpenTrickyActivity extends SDLActivity {
         p.edit().putString(KEY_ISO, u.toString()).apply();
         int fd = openFd(a, u);
         return fd >= 0 ? fd : -2;
+    }
+
+    /** Where the disc image starts in the file of the last openDiscImage: 0, or its place in the APK. */
+    public static long discImageOffset() {
+        return sOffset;
     }
 
     private static int openFd(Activity a, Uri u) {

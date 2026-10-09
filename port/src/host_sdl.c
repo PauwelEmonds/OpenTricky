@@ -98,8 +98,9 @@ void host_open_path(const char *path, BOOL folder)
 
 #ifdef __ANDROID__
 /* OpenTrickyActivity.openDiscImage(forget): the disc image as an open file
- * descriptor -- the one chosen before, or the system's file picker. */
-static int java_open_disc(int forget)
+ * descriptor -- the one packed into the APK, the one chosen before, or the
+ * system's file picker; *offset where the image starts in that file. */
+static int java_open_disc(int forget, long long *offset)
 {
     JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
     jobject act = (jobject)SDL_AndroidGetActivity();
@@ -109,6 +110,10 @@ static int java_open_disc(int forget)
     jmethodID m = (*env)->GetStaticMethodID(env, c, "openDiscImage", "(Z)I");
     if (m) r = (*env)->CallStaticIntMethod(env, c, m, (jboolean)(forget ? JNI_TRUE : JNI_FALSE));
     if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); r = -2; }
+    *offset = 0;
+    m = (*env)->GetStaticMethodID(env, c, "discImageOffset", "()J");
+    if (m && r >= 0) *offset = (long long)(*env)->CallStaticLongMethod(env, c, m);
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); *offset = 0; }
     (*env)->DeleteLocalRef(env, c);
     (*env)->DeleteLocalRef(env, act);
     return r;
@@ -124,9 +129,11 @@ BOOL host_launcher_run(struct LauncherConfig *cfg)
     /* The system's file picker; after an "fd:" image that did not work, it
      * says so. The choice is not written to settings.ini: the app keeps the
      * permission and opens it again at the next start. */
-    int fd = java_open_disc(!strncmp(cfg->iso, "fd:", 3));
+    long long off = 0;
+    int fd = java_open_disc(!strncmp(cfg->iso, "fd:", 3), &off);
     if (fd < 0) return FALSE;                     /* cancelled: the app closes */
-    snprintf(cfg->iso, sizeof cfg->iso, "fd:%d", fd);
+    if (off > 0) snprintf(cfg->iso, sizeof cfg->iso, "fd:%d@%lld", fd, off);   /* packed in the APK */
+    else snprintf(cfg->iso, sizeof cfg->iso, "fd:%d", fd);
     return TRUE;
 #else
     char ini[1024];
@@ -389,6 +396,10 @@ int host_run(int (*game_main)(void))
      * (settings.c's game folder is OT_DATA_DIR). */
     setenv("OT_DATA_DIR", host_data_dir(), 0);
 #ifdef __ANDROID__
+    /* A phone is wider than 16:9 and has no settings screen: the game's own
+     * widescreen menus (Menus=16:9) rather than 4:3 ones between wide bars.
+     * Races fill the screen either way (ScreenShape=auto). */
+    setenv("XBOX_WIDE_MENUS", "16:9", 0);
     {   /* Android drops stdout and stderr: everything goes to the log in the
          * app's folder, replaced at each start, for bug reports. */
         char log[1100];
