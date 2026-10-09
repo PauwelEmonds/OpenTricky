@@ -19,6 +19,7 @@
 #include "../../kernel/xbox_perf.h"
 #include "../../nv2a/nv2a_psh.h"
 #include "gles_vsh.h"
+#include "gles_progcache.h"
 #include <dxgiformat.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -124,48 +125,10 @@ static void stream_reserve(Stream *s, GLsizeiptr total)
 /* shaders                                                                   */
 /* ======================================================================== */
 
-static GLuint compile(GLenum type, const char *src, const char *tag)
-{
-    GLuint sh = glCreateShader(type);
-    GLint ok = 0;
-    glShaderSource(sh, 1, &src, NULL);
-    glCompileShader(sh);
-    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        static int told;
-        char log[4096];
-        glGetShaderInfoLog(sh, sizeof log, NULL, log);
-        if (told++ < 6)
-            fprintf(stderr, "[GLES] %s %s shader failed:\n%s\n--- source ---\n%s\n", tag,
-                    type == GL_VERTEX_SHADER ? "vertex" : "fragment", log, src);
-        glDeleteShader(sh);
-        return 0;
-    }
-    return sh;
-}
 
 GLuint gles_compile_program(const char *vs, const char *fs, const char *tag)
 {
-    GLuint v = compile(GL_VERTEX_SHADER, vs, tag), f, p;
-    GLint ok = 0;
-    if (!v) return 0;
-    f = compile(GL_FRAGMENT_SHADER, fs, tag);
-    if (!f) { glDeleteShader(v); return 0; }
-    p = glCreateProgram();
-    glAttachShader(p, v);
-    glAttachShader(p, f);
-    glLinkProgram(p);
-    glDeleteShader(v);
-    glDeleteShader(f);
-    glGetProgramiv(p, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[4096];
-        glGetProgramInfoLog(p, sizeof log, NULL, log);
-        fprintf(stderr, "[GLES] %s program link failed:\n%s\n", tag, log);
-        glDeleteProgram(p);
-        return 0;
-    }
-    return p;
+    return pc_link_sync(vs, fs, tag);
 }
 
 /* Bind the samplers named tex0..tex3 to units 0..3 and the uniform block
@@ -217,27 +180,8 @@ static const char s_nv_vs[] =
     "}\n";
 
 #define NV_PS_CACHE 4096
-static struct { uint64_t key; GLuint prog, fs; GLint u_screen; float screen[4]; } g_ps[NV_PS_CACHE];
-static GLuint s_nv_vs_sh;           /* s_nv_vs, compiled once */
+static struct { uint64_t key; GLuint prog; char *src; GLint u_screen; float screen[4]; } g_ps[NV_PS_CACHE];
 
-static GLuint link2(GLuint vs, GLuint fs, const char *tag)
-{
-    GLuint p = glCreateProgram();
-    GLint ok = 0;
-    glAttachShader(p, vs);
-    glAttachShader(p, fs);
-    glLinkProgram(p);
-    glGetProgramiv(p, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        static int told;
-        char log[4096];
-        glGetProgramInfoLog(p, sizeof log, NULL, log);
-        if (told++ < 6) fprintf(stderr, "[GLES] %s program link failed:\n%s\n", tag, log);
-        glDeleteProgram(p);
-        return 0;
-    }
-    return p;
-}
 static int g_nps;
 volatile long g_nv_compiles = 0;
 volatile double g_nv_compile_ms = 0;
@@ -279,9 +223,8 @@ int d3d8_nv2a_add_ps(unsigned long long key, const char *glsl, int len)
     i = -1 - i;
     gles_check_thread("add_ps");
     t0 = now_ms();
-    if (!s_nv_vs_sh) s_nv_vs_sh = compile(GL_VERTEX_SHADER, s_nv_vs, "nv2a");
-    g_ps[i].fs = compile(GL_FRAGMENT_SHADER, glsl, "nv2a");
-    p = (s_nv_vs_sh && g_ps[i].fs) ? link2(s_nv_vs_sh, g_ps[i].fs, "nv2a") : 0;
+    g_ps[i].src = strdup(glsl);
+    p = g_ps[i].src ? pc_link_sync(s_nv_vs, g_ps[i].src, "nv2a") : 0;
     g_nv_compiles++;
     g_nv_compile_ms += now_ms() - t0;
     g_ps[i].key = key;
@@ -751,6 +694,7 @@ int  d3d8_GetAnisotropy(void)  { return s_host_aniso; }
 
 int gles_draw_init(void)
 {
+    pc_init();
     const char *ext = (const char *)glGetString(GL_EXTENSIONS);
     if (!ext) ext = "";
     s_has_depth_clamp = strstr(ext, "GL_EXT_depth_clamp") != NULL;
@@ -900,10 +844,11 @@ HRESULT d3d8_nv2a_draw(D3DPRIMITIVETYPE prim, UINT prim_count, const void *verts
  * OT_GL_VSH=0 runs every program on the CPU. */
 
 #define VSH_CACHE 1024
-static struct { uint64_t key; GLuint sh; int done; } g_vsh[VSH_CACHE];
+static struct { uint64_t key; char *src; int done; } g_vsh[VSH_CACHE];
 static int g_nvsh;
 #define PAIR_CACHE 4096
-static struct { uint64_t key; GLuint prog; } g_pair[PAIR_CACHE];
+/* state: 1 building (job), 2 ready, 3 failed */
+static struct { uint64_t key; GLuint prog; int state; PcJob *job; } g_pair[PAIR_CACHE];
 static int g_npair;
 
 static int vsh_on(void)
@@ -979,9 +924,9 @@ static void vsh_kinds(const Nv2aVshDraw *d, uint8_t kind[16])
     }
 }
 
-/* The vertex shader of this program and these inputs, compiled on first use
- * (a failure is remembered). */
-static GLuint vsh_get(const Nv2aVshDraw *d, uint64_t *keyp)
+/* The vertex shader source of this program and these inputs, made on first
+ * use (NULL if it cannot be). */
+static const char *vsh_get(const Nv2aVshDraw *d, uint64_t *keyp)
 {
     static char src[262144];
     uint8_t kind[16];
@@ -996,30 +941,38 @@ static GLuint vsh_get(const Nv2aVshDraw *d, uint64_t *keyp)
     h = (unsigned)(key ^ (key >> 31)) & (VSH_CACHE - 1);
     for (n = 0; n < VSH_CACHE; n++, h = (h + 1) & (VSH_CACHE - 1)) {
         if (!g_vsh[h].done) break;
-        if (g_vsh[h].key == key) return g_vsh[h].sh;
+        if (g_vsh[h].key == key) return g_vsh[h].src;
     }
-    if (n == VSH_CACHE || g_nvsh >= VSH_CACHE * 3 / 4) return 0;
+    if (n == VSH_CACHE || g_nvsh >= VSH_CACHE * 3 / 4) return NULL;
     g_nvsh++;
     g_vsh[h].key = key;
     g_vsh[h].done = 1;
-    g_vsh[h].sh = 0;
+    g_vsh[h].src = NULL;
     len = gles_vsh_glsl(d->prog, d->prog_len, d->inputs, kind, d->topology == D3DPT_POINTLIST,
                         src, (int)sizeof src);
-    if (len <= 0) return 0;
-    {
-        double t0 = now_ms();
-        g_vsh[h].sh = compile(GL_VERTEX_SHADER, src, "nv2a vertex program");
-        g_nv_compiles++;
-        if (g_perf_on) perf_count(PC_COMPILE, 1);
-        g_nv_compile_ms += now_ms() - t0;
-    }
-    if (g_vsh[h].sh && (g_nvsh <= 64 || (g_nvsh % 64) == 0))
-        fprintf(stderr, "[NV2A-VSH] compiled vertex program %d (%d instructions)\n", g_nvsh, d->prog_len);
-    return g_vsh[h].sh;
+    if (len <= 0) return NULL;
+    g_vsh[h].src = strdup(src);
+    return g_vsh[h].src;
 }
 
-/* The program of a vertex shader and a combiner shader, linked on first use. */
-static GLuint pair_get(uint64_t vkey, GLuint vs, int psi)
+static void pair_ready(int h, GLuint p)
+{
+    GLuint bi;
+    g_pair[h].prog = p;
+    g_pair[h].state = p ? 2 : 3;
+    if (!p) return;
+    program_bind_units(p, "PshConsts");
+    bi = glGetUniformBlockIndex(p, "VshConsts");
+    if (bi != GL_INVALID_INDEX) glUniformBlockBinding(p, bi, 1);
+    bi = glGetUniformBlockIndex(p, "VshParams");
+    if (bi != GL_INVALID_INDEX) glUniformBlockBinding(p, bi, 2);
+    gles_invalidate_state();
+}
+
+/* The program of a vertex shader and a combiner shader: from the disk cache,
+ * else built on the worker thread (gles_progcache.c). 0 until it is ready --
+ * the caller then has the draw done on the CPU. */
+static GLuint pair_get(uint64_t vkey, const char *vsrc, int psi)
 {
     uint64_t key = vkey * 0x9E3779B97F4A7C15ull ^ g_ps[psi].key;
     unsigned h = (unsigned)(key ^ (key >> 29) ^ (key >> 47)) & (PAIR_CACHE - 1), n;
@@ -1027,26 +980,29 @@ static GLuint pair_get(uint64_t vkey, GLuint vs, int psi)
     if (!key) key = 1;
     for (n = 0; n < PAIR_CACHE; n++, h = (h + 1) & (PAIR_CACHE - 1)) {
         if (!g_pair[h].key) break;
-        if (g_pair[h].key == key) return g_pair[h].prog;
+        if (g_pair[h].key == key) {
+            if (g_pair[h].state == 1 && pc_job_poll(g_pair[h].job, &p)) {
+                g_pair[h].job = NULL;
+                pair_ready((int)h, p);
+            }
+            return g_pair[h].state == 2 ? g_pair[h].prog : 0;
+        }
     }
     if (n == PAIR_CACHE || g_npair >= PAIR_CACHE * 3 / 4) return 0;
     g_npair++;
+    g_pair[h].key = key;
     {
         double t0 = now_ms();
-        p = link2(vs, g_ps[psi].fs, "nv2a vertex program");
+        p = pc_load_cached(vsrc, g_ps[psi].src);
+        if (!p && !(g_pair[h].job = pc_link_async(vsrc, g_ps[psi].src, "nv2a vertex program"))) {
+            p = pc_link_sync(vsrc, g_ps[psi].src, "nv2a vertex program");
+            g_nv_compiles++;
+            if (g_perf_on) perf_count(PC_COMPILE, 1);
+        }
         g_nv_compile_ms += now_ms() - t0;
     }
-    g_pair[h].key = key;
-    g_pair[h].prog = p;
-    if (p) {
-        GLuint bi;
-        program_bind_units(p, "PshConsts");
-        bi = glGetUniformBlockIndex(p, "VshConsts");
-        if (bi != GL_INVALID_INDEX) glUniformBlockBinding(p, bi, 1);
-        bi = glGetUniformBlockIndex(p, "VshParams");
-        if (bi != GL_INVALID_INDEX) glUniformBlockBinding(p, bi, 2);
-        gles_invalidate_state();
-    }
+    if (g_pair[h].job) { g_pair[h].state = 1; return 0; }
+    pair_ready((int)h, p);
     return p;
 }
 
@@ -1077,6 +1033,8 @@ static void ustats_vb(const uint8_t *base, uint32_t size)
 
 void gles_frame_end(void)
 {
+    static unsigned frames;
+    if ((++frames % 600) == 0) pc_report();
     if (s_ustats <= 0) return;
     s_us_nseen = 0;
     if (++s_us_acc.frames >= 60) {
@@ -1098,7 +1056,7 @@ int d3d8_nv2a_vsh_ready(const Nv2aVshDraw *d)
         if (!(d->inputs & (1u << a)) || (d->attr[a].kind & 0x0F) == NV2A_VSH_IN_CONST) continue;
         if (!gl_attr_fmt(d->attr[a].dxgi_format, &n, &t, &nm, &in)) return 0;
     }
-    return vsh_get(d, &key) != 0;
+    return vsh_get(d, &key) != NULL;
 }
 
 int d3d8_nv2a_draw_program_gpu(const Nv2aVshDraw *d)
@@ -1116,12 +1074,13 @@ int d3d8_nv2a_draw_program_gpu(const Nv2aVshDraw *d)
     static uint32_t *ib;
     static uint32_t ib_cap;
     GLenum prim;
-    GLuint vs, prog;
+    const char *vs;
+    GLuint prog;
     GLintptr ioff;
     uint64_t vkey;
     double pt;
 
-    if (psi < 0 || !g_ps[psi].fs || !d->nindices || !vsh_on()) return 0;
+    if (psi < 0 || !g_ps[psi].src || !d->nindices || !vsh_on()) return 0;
     switch (d->topology) {
     case D3DPT_TRIANGLELIST: prim = GL_TRIANGLES;  break;
     case D3DPT_LINELIST:     prim = GL_LINES;      break;
@@ -1131,9 +1090,9 @@ int d3d8_nv2a_draw_program_gpu(const Nv2aVshDraw *d)
     }
     gles_check_thread("nv2a_draw_program_gpu");
     vs = vsh_get(d, &vkey);
-    if (!vs) return 0;
+    if (!vs) return 2;
     prog = pair_get(vkey, vs, psi);
-    if (!prog) return 0;
+    if (!prog) { pc_note_fallback(); return 2; }       /* still building: on the CPU */
     pt = g_perf_on ? perf_now() : 0.0;
 
     /* Attributes interleaved in one array share an upload (d3d8_nv2a.c). */

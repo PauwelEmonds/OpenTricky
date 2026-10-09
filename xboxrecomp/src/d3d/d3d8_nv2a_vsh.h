@@ -61,8 +61,9 @@ typedef struct {
     int                raster;          /* as d3d8_nv2a_draw */
 } Nv2aVshDraw;
 
-/* 1 if drawn; 0 if this draw cannot go through the GPU path (the caller then
- * runs the program on the CPU). */
+/* 1 if drawn; 0 if this draw cannot go through the GPU path; 2 if its shader
+ * is not built yet (the GL renderer builds new ones on another thread): the
+ * caller draws this one on the CPU. */
 int d3d8_nv2a_draw_program_gpu(const Nv2aVshDraw *d);
 
 /* XBOX_FIX_POINTS_GPU (default 1): program draws in point mode

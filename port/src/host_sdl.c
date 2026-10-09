@@ -39,6 +39,7 @@ void d3d8_SetHostWindow(void *sdl_window);
 void d3d8_GlesWindowHints(void);
 int  d3d8_HostKey(unsigned vk);
 void d3d8_SetScreenshotDir(const char *dir);
+void d3d8_SetShaderCacheDir(const char *dir);
 void d3d8_HostSetFullscreen(int on);
 int  d3d8_HostIsFullscreen(void);
 
@@ -398,6 +399,9 @@ int host_run(int (*game_main)(void))
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
     SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+    /* EGL rather than GLX on X11: new shaders are built on a second, shared
+     * EGL context (gles_progcache.c). */
+    SDL_SetHint(SDL_HINT_VIDEO_X11_FORCE_EGL, "1");
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) != 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
@@ -411,6 +415,8 @@ int host_run(int (*game_main)(void))
         char shots[1100];
         snprintf(shots, sizeof shots, "%s/Screenshots", host_data_dir());
         d3d8_SetScreenshotDir(shots);
+        snprintf(shots, sizeof shots, "%s/ShaderCache", host_data_dir());
+        d3d8_SetShaderCacheDir(shots);
     }
 
     /* The window at the configured size, shrunk to fit the display. */

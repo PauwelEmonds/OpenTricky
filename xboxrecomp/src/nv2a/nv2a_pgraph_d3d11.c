@@ -2211,6 +2211,10 @@ static float points_kx(void)
     return kx;
 }
 
+/* Set while draw_program() redraws on the CPU a draw whose GPU shader is not
+ * built yet (d3d8_nv2a_draw_program_gpu returned 2). */
+static int g_force_cpu;
+
 static int gpu_prepare(Nv2aVshDraw *d, const uint32_t *indices, uint32_t start, uint32_t count)
 {
     static int on = -1;
@@ -2219,7 +2223,7 @@ static int gpu_prepare(Nv2aVshDraw *d, const uint32_t *indices, uint32_t start, 
     uint32_t mode = g_pg.draw_mode;
 
     if (on < 0) { const char *e = getenv("XBOX_VSH_GPU"); on = !(e && e[0] == '0'); }
-    if (!on || g_pg.prog_len <= 0 || count == 0) GPU_NO(0);
+    if (!on || g_pg.prog_len <= 0 || count == 0 || g_force_cpu) GPU_NO(0);
     if (mode == 1 && !d3d8_points_gpu_on()) GPU_NO(1);      /* points sur GPU */
     if (g_pg.prog_writes_c) GPU_NO(2);
 
@@ -3113,8 +3117,17 @@ static void draw_program(const uint32_t *indices, uint32_t start, uint32_t count
                         okb[i] = (uint8_t)vsh_vertex(indices ? indices[i] : start + i, &vb[i], &psb[i]);
                     d3d8_nv2a_points_expect(tb, points_squares(vb, okb, psb, count, tb), sizeof(ProgVertex));
                 }
-                if (d3d8_nv2a_draw_program_gpu(&gd) && prim == D3DPT_TRIANGLELIST)
-                    g_vs.prog_tris += n / 3;
+                {
+                    int r = d3d8_nv2a_draw_program_gpu(&gd);
+                    if (r == 2) {
+                        /* Its shader is still being built: this time on the CPU. */
+                        g_force_cpu = 1;
+                        draw_program(indices, start, count);
+                        g_force_cpu = 0;
+                        return;
+                    }
+                    if (r && prim == D3DPT_TRIANGLELIST) g_vs.prog_tris += n / 3;
+                }
             } else {
             uint32_t chunk = 18000u - (18000u % per), off;
             for (off = 0; off < n; off += chunk) {

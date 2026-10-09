@@ -23,6 +23,15 @@ ES 3.0 has no geometry shader, so each point is an instance of six vertices
 whose shader builds the square (`XBOX_FIX_POINTS_GPU=0` expands them on the
 CPU instead).
 
+Shaders: every GL program is kept in `ShaderCache/` (in the data folder) as
+the driver's binary, so a second run builds nothing. New vertex-program
+shaders are built on a worker thread with its own EGL context; until one is
+ready its draws take the CPU path, which looks the same. Only the combiner
+shaders (which the CPU path needs too) are still built on the render thread,
+once per driver. A driver that refuses its own binaries (the emulator's)
+gets a `.refused` marker and no disk cache. `OT_SHADER_CACHE=0` and
+`OT_SHADER_ASYNC=0` turn either off; the log's `[SHADERS]` lines count both.
+
 Switches for testing: `OT_GL_VSH=0` runs vertex programs on the CPU;
 `OT_GL_UPLOAD=map|sub` picks how vertices go up (mapped by default,
 `glBufferSubData` on emulators); `OT_UPLOAD_STATS=1` logs the bytes uploaded

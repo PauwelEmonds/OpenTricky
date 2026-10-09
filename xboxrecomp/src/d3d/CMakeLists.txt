@@ -26,14 +26,15 @@ else()
         gles/gles_resources.c
         gles/gles_stubs.c
         gles/gles_vsh.c
+        gles/gles_progcache.c
     )
     if(NOT TARGET SDL2::SDL2)
         find_package(SDL2 REQUIRED)
     endif()
     if(ANDROID)
-        target_link_libraries(xbox_d3d8 PUBLIC platform SDL2::SDL2 GLESv3)
+        target_link_libraries(xbox_d3d8 PUBLIC platform SDL2::SDL2 GLESv3 EGL)
     else()
-        target_link_libraries(xbox_d3d8 PUBLIC platform SDL2::SDL2 GLESv2)
+        target_link_libraries(xbox_d3d8 PUBLIC platform SDL2::SDL2 GLESv2 EGL)
     endif()
 endif()
 
