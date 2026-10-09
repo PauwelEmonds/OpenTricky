@@ -202,6 +202,8 @@ static ID3D11PixelShader *ps_find(unsigned long long key)
     return NULL;
 }
 
+void d3d8_nv2a_ps_state(unsigned long long key, const void *state) { (void)key; (void)state; }
+
 int d3d8_nv2a_has_ps(unsigned long long key)
 {
     return ps_find(key) != NULL;

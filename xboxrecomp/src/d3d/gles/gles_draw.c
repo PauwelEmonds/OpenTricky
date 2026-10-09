@@ -20,6 +20,7 @@
 #include "../../nv2a/nv2a_psh.h"
 #include "gles_vsh.h"
 #include "gles_progcache.h"
+#include "gles_psh_uber.h"
 #include <dxgiformat.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -180,7 +181,26 @@ static const char s_nv_vs[] =
     "}\n";
 
 #define NV_PS_CACHE 4096
-static struct { uint64_t key; GLuint prog; char *src; GLint u_screen; float screen[4]; } g_ps[NV_PS_CACHE];
+/* state: 1 building (job), 2 ready, 3 failed. Until 2, draws use the
+ * ubershader with `uber` (if has_uber). */
+static struct {
+    uint64_t key; GLuint prog; char *src; GLint u_screen; float screen[4];
+    int state, has_uber, checked; PcJob *job;
+    uint32_t uber[GLES_PSH_UBER_WORDS];
+} g_ps[NV_PS_CACHE];
+
+/* The ubershader program (s_nv_vs + gles_psh_uber_fs); OT_PSH_UBER=1 draws
+ * everything with it (to compare). */
+static GLuint s_uber;
+static GLint s_uber_u_screen;
+static float s_uber_screen[4];
+static int s_uber_all;
+static int s_uber_check;            /* OT_PSH_UBER_CHECK=1: compare it with each real shader */
+
+/* d3d8_nv2a_ps_state's hand-over to the next add_ps. */
+static uint64_t s_pend_key;
+static int s_pend_ok;
+static uint32_t s_pend_uber[GLES_PSH_UBER_WORDS];
 
 static int g_nps;
 volatile long g_nv_compiles = 0;
@@ -201,7 +221,34 @@ static int ps_find(uint64_t key)
 int d3d8_nv2a_has_ps(unsigned long long key)
 {
     int i = ps_find(key);
-    return i >= 0 && g_ps[i].prog;
+    return i >= 0 && (g_ps[i].state != 3 || g_ps[i].has_uber);
+}
+
+void d3d8_nv2a_ps_state(unsigned long long key, const void *state)
+{
+    s_pend_key = key;
+    s_pend_ok = state && gles_psh_uber_pack((const Nv2aPshState *)state, s_pend_uber);
+}
+
+static void ps_ready(int i, GLuint p)
+{
+    g_ps[i].prog = p;
+    g_ps[i].state = p ? 2 : 3;
+    if (!p) return;
+    program_bind_units(p, "PshConsts");
+    g_ps[i].u_screen = glGetUniformLocation(p, "u_screen");
+    gles_invalidate_state();
+}
+
+/* 1 when combiner shader i is ready to draw with. */
+static int ps_poll(int i)
+{
+    GLuint p;
+    if (g_ps[i].state == 1 && pc_job_poll(g_ps[i].job, &p)) {
+        g_ps[i].job = NULL;
+        ps_ready(i, p);
+    }
+    return g_ps[i].state == 2 && !(s_uber_all && g_ps[i].has_uber);
 }
 
 static double now_ms(void)
@@ -218,23 +265,32 @@ int d3d8_nv2a_add_ps(unsigned long long key, const char *glsl, int len)
     GLuint p;
     double t0;
     (void)len;
-    if (i >= 0) return g_ps[i].prog != 0;
+    if (i >= 0) return g_ps[i].state != 3 || g_ps[i].has_uber;
     if (i == -1 - NV_PS_CACHE || g_nps >= NV_PS_CACHE * 3 / 4) return 0;
     i = -1 - i;
     gles_check_thread("add_ps");
     t0 = now_ms();
-    g_ps[i].src = strdup(glsl);
-    p = g_ps[i].src ? pc_link_sync(s_nv_vs, g_ps[i].src, "nv2a") : 0;
-    g_nv_compiles++;
-    g_nv_compile_ms += now_ms() - t0;
     g_ps[i].key = key;
-    g_ps[i].prog = p;
+    g_ps[i].src = strdup(glsl);
+    g_ps[i].has_uber = s_uber && s_pend_ok && s_pend_key == key;
+    if (g_ps[i].has_uber) memcpy(g_ps[i].uber, s_pend_uber, sizeof g_ps[i].uber);
+    s_pend_ok = 0;
     g_nps++;
-    if (!p) return 0;
-    program_bind_units(p, "PshConsts");
-    g_ps[i].u_screen = glGetUniformLocation(p, "u_screen");
-    gles_invalidate_state();
-    return 1;
+    /* From the disk cache; else built on the worker while the ubershader
+     * draws; else (no worker, or no ubershader for it) here. */
+    p = g_ps[i].src ? pc_load_cached(s_nv_vs, g_ps[i].src) : 0;
+    if (!p && g_ps[i].src && g_ps[i].has_uber &&
+        (g_ps[i].job = pc_link_async(s_nv_vs, g_ps[i].src, "nv2a"))) {
+        g_ps[i].state = 1;
+    } else {
+        if (!p && g_ps[i].src) {
+            p = pc_link_sync(s_nv_vs, g_ps[i].src, "nv2a");
+            g_nv_compiles++;
+        }
+        ps_ready(i, p);
+    }
+    g_nv_compile_ms += now_ms() - t0;
+    return g_ps[i].state != 3 || g_ps[i].has_uber;
 }
 
 /* ---- fixed-function shader (d3d8_shaders.c, without lighting) ------------- */
@@ -426,7 +482,7 @@ void gles_invalidate_state(void)
  * parameters. Draws in a row mostly repeat them: then the range bound last
  * is kept. Callers reserve s_ubo for the whole draw first, so no upload of
  * the draw orphans the buffer an earlier binding of it points into. */
-static struct { uint8_t last[VSHCPU_CONSTANTS * 16]; unsigned size, gen, epoch; } s_us[3];
+static struct { uint8_t last[VSHCPU_CONSTANTS * 16]; unsigned size, gen, epoch; } s_us[4];
 
 static int ubo_bind(GLuint binding, const void *data, unsigned size)
 {
@@ -695,6 +751,22 @@ int  d3d8_GetAnisotropy(void)  { return s_host_aniso; }
 int gles_draw_init(void)
 {
     pc_init();
+    {
+        const char *e = getenv("OT_PSH_UBER");
+        s_uber_all = e && e[0] == '1';
+        s_uber_check = getenv("OT_PSH_UBER_CHECK") != NULL;
+        if (!(e && e[0] == '0')) {
+            s_uber = pc_link_sync(s_nv_vs, gles_psh_uber_fs, "combiner ubershader");
+            if (s_uber) {
+                GLuint bi;
+                program_bind_units(s_uber, "PshConsts");
+                bi = glGetUniformBlockIndex(s_uber, "PshUber");
+                if (bi != GL_INVALID_INDEX) glUniformBlockBinding(s_uber, bi, 3);
+                s_uber_u_screen = glGetUniformLocation(s_uber, "u_screen");
+            } else
+                fprintf(stderr, "[SHADERS] no combiner ubershader: new combiner shaders build on the render thread\n");
+        }
+    }
     const char *ext = (const char *)glGetString(GL_EXTENSIONS);
     if (!ext) ext = "";
     s_has_depth_clamp = strstr(ext, "GL_EXT_depth_clamp") != NULL;
@@ -779,16 +851,121 @@ static UINT prim_verts(D3DPRIMITIVETYPE p, UINT n)
     }
 }
 
+/* OT_PSH_UBER_CHECK=1 (diagnostic): draw this draw with combiner shader i and
+ * with the ubershader into a scratch target (no blending, depth or stencil;
+ * same viewport and scissor), read both back and log how far they differ. */
+static void uber_check(int i, GLenum mode, GLint first, GLsizei count, int raster)
+{
+    static GLuint fbo, tex;
+    static int tw, th;
+    static unsigned long long checks, bad;
+    static uint8_t *pa, *pb;
+    GLint vp[4];
+    size_t n, k;
+    int maxd = 0, differ = 0, covered = 0;
+    glGetIntegerv(GL_VIEWPORT, vp);
+    if (vp[2] <= 0 || vp[3] <= 0) return;
+    if (!fbo || tw < vp[0] + vp[2] || th < vp[1] + vp[3]) {
+        if (!fbo) { glGenFramebuffers(1, &fbo); glGenTextures(1, &tex); }
+        else { glDeleteTextures(1, &tex); glGenTextures(1, &tex); }
+        tw = vp[0] + vp[2]; th = vp[1] + vp[3];
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, tw, th);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        free(pa); free(pb);
+        pa = (uint8_t *)malloc((size_t)tw * th * 4);
+        pb = (uint8_t *)malloc((size_t)tw * th * 4);
+        gles_invalidate_state();
+        gles_apply_states(raster);
+    }
+    if (!pa || !pb) return;
+    n = (size_t)vp[2] * vp[3] * 4;
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDisable(GL_STENCIL_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(g_ps[i].prog);
+    glDrawArrays(mode, first, count);
+    glReadPixels(vp[0], vp[1], vp[2], vp[3], GL_RGBA, GL_UNSIGNED_BYTE, pa);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(s_uber);
+    if (memcmp(s_uber_screen, g_ps[i].screen, sizeof s_uber_screen)) {
+        memcpy(s_uber_screen, g_ps[i].screen, sizeof s_uber_screen);
+        glUniform4fv(s_uber_u_screen, 1, s_uber_screen);
+    }
+    ubo_bind(3, g_ps[i].uber, sizeof g_ps[i].uber);
+    glDrawArrays(mode, first, count);
+    glReadPixels(vp[0], vp[1], vp[2], vp[3], GL_RGBA, GL_UNSIGNED_BYTE, pb);
+    for (k = 0; k < n; k += 4) {
+        int d = 0, c;
+        if (pa[k + 3] || pb[k + 3] || pa[k] || pb[k]) covered++;
+        for (c = 0; c < 4; c++) {
+            int e = abs((int)pa[k + c] - (int)pb[k + c]);
+            if (e > d) d = e;
+        }
+        if (d > maxd) maxd = d;
+        if (d > 2) differ++;
+    }
+    checks++;
+    if (differ) bad++;
+    {
+        /* OT_PSH_UBER_DUMP=dir: the first differing pairs as PPM (RGB, then alpha). */
+        static int dumped;
+        const char *dir = getenv("OT_PSH_UBER_DUMP");
+        if (dir && differ && dumped < 6) {
+            int w, which;
+            for (which = 0; which < 2; which++) {
+                const uint8_t *px = which ? pb : pa;
+                char path[600];
+                FILE *f;
+                snprintf(path, sizeof path, "%s/check%d_%016llX_%s.ppm", dir, dumped,
+                         (unsigned long long)g_ps[i].key, which ? "uber" : "real");
+                if (!(f = fopen(path, "wb"))) continue;
+                fprintf(f, "P6\n%d %d\n255\n", vp[2] * 2, vp[3]);
+                for (w = vp[3] - 1; w >= 0; w--) {
+                    int x;
+                    for (x = 0; x < vp[2]; x++) fwrite(px + ((size_t)w * vp[2] + x) * 4, 1, 3, f);
+                    for (x = 0; x < vp[2]; x++) {
+                        uint8_t a3[3];
+                        a3[0] = a3[1] = a3[2] = px[((size_t)w * vp[2] + x) * 4 + 3];
+                        fwrite(a3, 1, 3, f);
+                    }
+                }
+                fclose(f);
+            }
+            fprintf(stderr, "[UBER-CHECK] dumped pair %d\n", dumped);
+            dumped++;
+        }
+    }
+    if (differ || (checks % 10) == 1)
+        fprintf(stderr, "[UBER-CHECK] shader %016llX: %d of %d covered pixels differ by more than 2/255 "
+                "(max %d); %llu checked, %llu differ\n", (unsigned long long)g_ps[i].key, differ, covered,
+                maxd, checks, bad);
+    gles_invalidate_state();
+    gles_apply_states(raster);
+}
+
 HRESULT d3d8_nv2a_draw(D3DPRIMITIVETYPE prim, UINT prim_count, const void *verts, UINT stride,
                        unsigned long long ps_key, const void *ps_consts, UINT ps_consts_size,
                        int raster)
 {
-    int i = ps_find(ps_key);
+    int i = ps_find(ps_key), uber;
     UINT nv = prim_verts(prim, prim_count);
-    GLintptr voff, uoff;
+    GLintptr voff;
     GLuint prog;
-    float screen[4];
-    if (i < 0 || !(prog = g_ps[i].prog) || !nv) return E_FAIL;
+    GLint u_screen;
+    float screen[4], *screen_set;
+    if (i < 0 || !nv) return E_FAIL;
+    uber = !ps_poll(i);
+    if (!uber) {
+        prog = g_ps[i].prog; u_screen = g_ps[i].u_screen; screen_set = g_ps[i].screen;
+    } else if (g_ps[i].has_uber) {
+        prog = s_uber; u_screen = s_uber_u_screen; screen_set = s_uber_screen;
+        pc_note_fallback();
+    } else
+        return E_FAIL;
     if (prim != D3DPT_TRIANGLELIST && prim != D3DPT_LINELIST && prim != D3DPT_LINESTRIP &&
         prim != D3DPT_POINTLIST)
         return E_INVALIDARG;
@@ -804,14 +981,15 @@ HRESULT d3d8_nv2a_draw(D3DPRIMITIVETYPE prim, UINT prim_count, const void *verts
     if (screen[1] <= 0.0f) screen[1] = 480.0f;
     screen[2] = (!(raster & 1) && !s_has_depth_clamp) ? 1.0f : 0.0f;
     screen[3] = 0.0f;
-    if (memcmp(g_ps[i].screen, screen, sizeof screen)) {
-        glUniform4fv(g_ps[i].u_screen, 1, screen);
-        memcpy(g_ps[i].screen, screen, sizeof screen);
+    if (memcmp(screen_set, screen, sizeof screen)) {
+        glUniform4fv(u_screen, 1, screen);
+        memcpy(screen_set, screen, sizeof screen);
     }
     PERF_STEP(PZ_DSTATE);
 
-    stream_reserve(&s_ubo, (GLsizeiptr)ps_consts_size + s_ubo_align);
+    stream_reserve(&s_ubo, (GLsizeiptr)ps_consts_size + sizeof g_ps[i].uber + 2 * s_ubo_align);
     if (!ubo_bind(0, ps_consts, ps_consts_size)) return E_OUTOFMEMORY;
+    if (uber && !ubo_bind(3, g_ps[i].uber, sizeof g_ps[i].uber)) return E_OUTOFMEMORY;
     PERF_STEP(PZ_DCB);
 
     /* The vertices at a multiple of the stride, so the attributes point at the
@@ -832,6 +1010,11 @@ HRESULT d3d8_nv2a_draw(D3DPRIMITIVETYPE prim, UINT prim_count, const void *verts
         S.layout = 1ull << 63 | stride;
     }
     PERF_STEP(PZ_DUP);
+    if (s_uber_check && !uber && g_ps[i].has_uber && g_ps[i].checked < 2) {
+        g_ps[i].checked++;
+        uber_check(i, gl_prim(prim), (GLint)(voff / (GLintptr)stride), (GLsizei)nv, raster);
+        use_program(prog);
+    }
     glDrawArrays(gl_prim(prim), (GLint)(voff / (GLintptr)stride), (GLsizei)nv);
     PERF_STEP(PZ_DDRAW);
     return S_OK;
@@ -1081,6 +1264,11 @@ int d3d8_nv2a_draw_program_gpu(const Nv2aVshDraw *d)
     double pt;
 
     if (psi < 0 || !g_ps[psi].src || !d->nindices || !vsh_on()) return 0;
+    if (!ps_poll(psi)) {                /* still building: the CPU path, with the ubershader */
+        if (!g_ps[psi].has_uber) return 0;
+        pc_note_fallback();
+        return 2;
+    }
     switch (d->topology) {
     case D3DPT_TRIANGLELIST: prim = GL_TRIANGLES;  break;
     case D3DPT_LINELIST:     prim = GL_LINES;      break;

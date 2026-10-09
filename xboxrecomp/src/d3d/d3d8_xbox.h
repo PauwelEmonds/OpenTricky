@@ -874,6 +874,9 @@ void d3d8_RequestScreenshot(const wchar_t *path);   /* PNG, end of next frame */
  * register combiners, keyed by nv2a_psh_key(). */
 int d3d8_nv2a_has_ps(unsigned long long key);
 int d3d8_nv2a_add_ps(unsigned long long key, const char *hlsl, int len);
+/* The combiner state (an Nv2aPshState) of the shader the next add_ps call
+ * brings: the GL renderer draws with it while that shader builds. */
+void d3d8_nv2a_ps_state(unsigned long long key, const void *state);
 HRESULT d3d8_nv2a_draw(D3DPRIMITIVETYPE prim, UINT prim_count, const void *verts, UINT stride,
                        unsigned long long ps_key, const void *ps_consts, UINT ps_consts_size,
                        int raster);

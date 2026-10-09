@@ -3062,6 +3062,7 @@ static void draw_program(const uint32_t *indices, uint32_t start, uint32_t count
                     if (f) { fwrite(hlsl, 1, (size_t)len, f); fclose(f); }
                 }
             }
+            d3d8_nv2a_ps_state(key, &ps);
             if (len <= 0 || !d3d8_nv2a_add_ps(key, hlsl, len)) {
                 if (failures++ < 8)
                     fprintf(stderr, "[NV2A-PSH] no shader for combiners %08X stages %d prog %08X "

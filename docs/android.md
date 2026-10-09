@@ -26,9 +26,11 @@ CPU instead).
 Shaders: every GL program is kept in `ShaderCache/` (in the data folder) as
 the driver's binary, so a second run builds nothing. New vertex-program
 shaders are built on a worker thread with its own EGL context; until one is
-ready its draws take the CPU path, which looks the same. Only the combiner
-shaders (which the CPU path needs too) are still built on the render thread,
-once per driver. A driver that refuses its own binaries (the emulator's)
+ready its draws take the CPU path, which looks the same. New combiner
+(pixel) shaders build there too; meanwhile their draws use a combiner
+"ubershader" (`gles/gles_psh_uber.c`) that reads the combiner registers at
+run time -- the same pixels (`OT_PSH_UBER_CHECK=1` compares the two, draw by
+draw; `OT_PSH_UBER=1` draws everything with it). A driver that refuses its own binaries (the emulator's)
 gets a `.refused` marker and no disk cache. `OT_SHADER_CACHE=0` and
 `OT_SHADER_ASYNC=0` turn either off; the log's `[SHADERS]` lines count both.
 
