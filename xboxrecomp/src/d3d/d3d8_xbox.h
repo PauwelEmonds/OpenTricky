@@ -830,6 +830,11 @@ float  d3d8_PointZoom(void);
  * view (radians), aspect, near and far planes. The OpenGL ES renderer's
  * ambient occlusion rebuilds positions from the depth with it. */
 void   d3d8_NoteProjection(float fov_y, float aspect, float zn, float zf);
+/* 1 when occlusion queries only tell whether any sample passed (OpenGL ES). */
+int    d3d8_OcclusionIsBinary(void);
+/* XBOX_VSH_CMP (diagnostic): 0 begin, 1 after the GPU draw, 2 after the CPU
+ * draw (compare and log), 3 cancel. */
+void   d3d8_nv2a_vsh_cmp(int step, unsigned long long hash);
 /* Ambient occlusion (GTAO) of the 3D: OpenGL ES renderer only (gles_post.c). */
 void   d3d8_SetAo(int on);
 int    d3d8_GetAo(void);

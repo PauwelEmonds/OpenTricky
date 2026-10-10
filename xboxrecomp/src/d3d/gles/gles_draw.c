@@ -947,6 +947,84 @@ static void uber_check(int i, GLenum mode, GLint first, GLsizei count, int raste
     gles_apply_states(raster);
 }
 
+/* XBOX_VSH_CMP=N (diagnostic, nv2a_pgraph_d3d11.c): one draw drawn through
+ * the GPU vertex program (step 0 -> 1) and again through the CPU vertex path
+ * (1 -> 2) into a scratch target cleared to black, read back after each and
+ * compared: how many pixels differ, and the mean colour of each, so a shift
+ * of the colour shows. Logged per vertex program (hash). */
+extern GLuint g_gles_cmp_fbo;
+
+void d3d8_nv2a_vsh_cmp(int step, unsigned long long hash)
+{
+    static GLuint fbo, tex;
+    static UINT tw, th;
+    static uint8_t *pa, *pb;
+    static unsigned long long runs, bad;
+    UINT w = g_gl.width, h = g_gl.height;
+    size_t k, n = (size_t)w * h * 4;
+    if (step == 0) {
+        if (!fbo || tw != w || th != h) {
+            if (!fbo) { glGenFramebuffers(1, &fbo); glGenTextures(1, &tex); }
+            else { glDeleteTextures(1, &tex); glGenTextures(1, &tex); }
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, (GLsizei)w, (GLsizei)h);
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+            tw = w; th = h;
+            free(pa); free(pb);
+            pa = (uint8_t *)malloc(n); pb = (uint8_t *)malloc(n);
+        }
+        g_gles_cmp_fbo = fbo;
+    }
+    if (step == 3 || !pa || !pb) {          /* cancelled: the GPU draw was not made */
+        g_gles_cmp_fbo = 0;
+        glBindFramebuffer(GL_FRAMEBUFFER, gles_draw_target());
+        gles_invalidate_state();
+        return;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    if (step == 1) glReadPixels(0, 0, (GLsizei)w, (GLsizei)h, GL_RGBA, GL_UNSIGNED_BYTE, pa);
+    if (step == 2) glReadPixels(0, 0, (GLsizei)w, (GLsizei)h, GL_RGBA, GL_UNSIGNED_BYTE, pb);
+    if (step < 2) {
+        glDisable(GL_SCISSOR_TEST);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        gles_invalidate_state();
+        return;
+    }
+    {
+        unsigned long long sa[3] = { 0, 0, 0 }, sb[3] = { 0, 0, 0 };
+        unsigned differ = 0, covered = 0, maxd = 0;
+        int c;
+        for (k = 0; k < n; k += 4) {
+            unsigned d = 0;
+            if (!(pa[k] | pa[k + 1] | pa[k + 2] | pb[k] | pb[k + 1] | pb[k + 2])) continue;
+            covered++;
+            for (c = 0; c < 3; c++) {
+                unsigned e = (unsigned)abs((int)pa[k + c] - (int)pb[k + c]);
+                if (e > d) d = e;
+                sa[c] += pa[k + c]; sb[c] += pb[k + c];
+            }
+            if (d > maxd) maxd = d;
+            if (d > 8) differ++;
+        }
+        runs++;
+        if (differ > covered / 50 + 16) {
+            bad++;
+            fprintf(stderr, "[VSH-CMP] program %016llX: %u of %u pixels differ (max %u); mean GPU %.0f %.0f %.0f, "
+                    "CPU %.0f %.0f %.0f (%llu of %llu draws differ)\n", hash, differ, covered, maxd,
+                    covered ? (double)sa[0] / covered : 0.0, covered ? (double)sa[1] / covered : 0.0,
+                    covered ? (double)sa[2] / covered : 0.0, covered ? (double)sb[0] / covered : 0.0,
+                    covered ? (double)sb[1] / covered : 0.0, covered ? (double)sb[2] / covered : 0.0,
+                    bad, runs);
+        }
+    }
+    g_gles_cmp_fbo = 0;
+    glBindFramebuffer(GL_FRAMEBUFFER, gles_draw_target());
+    gles_invalidate_state();
+}
+
 HRESULT d3d8_nv2a_draw(D3DPRIMITIVETYPE prim, UINT prim_count, const void *verts, UINT stride,
                        unsigned long long ps_key, const void *ps_consts, UINT ps_consts_size,
                        int raster)

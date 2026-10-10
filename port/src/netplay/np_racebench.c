@@ -515,7 +515,12 @@ void np_rb_init(void)
     }
     {
         const char *sp = getenv("XBOX_RACEBENCH_SHOTS");
+#ifdef _WIN32
         if (sp && *sp) MultiByteToWideChar(CP_ACP, 0, sp, -1, P.shot_pre, MAX_PATH);
+#else
+        /* wchar_t is 32 bits here, the shim's WCHAR 16: the C library's conversion */
+        if (sp && *sp) mbstowcs(P.shot_pre, sp, MAX_PATH);
+#endif
         else P.nshot = 0;
     }
     v = getenv("XBOX_RACEBENCH_LOG");

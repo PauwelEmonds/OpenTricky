@@ -72,6 +72,8 @@
 #ifndef FPS_CAP_H
 #define FPS_CAP_H
 
+#include <stdint.h>
+
 extern int g_fps_cap_on;
 
 void fps_cap_init(void);
@@ -79,6 +81,9 @@ void fps_cap_init(void);
  * the screen's). 0 when the hooks are not installed (XBOX_FPS_CAP_LIVE). */
 int  fps_cap_set(int cap);
 int  fps_cap_current(void);             /* 60 when off */
+/* The race in progress: state (4 = racing) and its tick counter, which
+ * stands still while the game is paused; -1 without a race. */
+int  game_race_state(uint32_t *tick);
 void (*fps_cap_lookup(unsigned int xbox_va))(void);
 
 #endif

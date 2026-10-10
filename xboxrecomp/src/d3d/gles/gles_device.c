@@ -51,10 +51,19 @@ void d3d8_SetHostPaused(int paused)
 static void wait_while_paused(void)
 {
     if (!s_paused && !s_resumed) return;
-    if (s_paused) fprintf(stderr, "[GLES] in the background: rendering paused\n");
+    if (s_paused) {
+        fprintf(stderr, "[GLES] in the background: rendering paused\n");
+        /* Let go of the window's surface: Android destroys it, and a surface
+         * still current here is not freed. SDL_GL_MakeCurrent with the same
+         * window and context on return is a no-op in SDL2 (it takes them for
+         * still current), so without this the context stayed on the dead
+         * surface: a black screen after switching apps. */
+        SDL_GL_MakeCurrent(s_window, NULL);
+    }
     while (s_paused) SDL_Delay(50);
     if (InterlockedExchange(&s_resumed, 0)) {
-        SDL_GL_MakeCurrent(s_window, (SDL_GLContext)g_gl.context);
+        if (SDL_GL_MakeCurrent(s_window, (SDL_GLContext)g_gl.context) < 0)
+            fprintf(stderr, "[GLES] the context does not go back on the window: %s\n", SDL_GetError());
         gles_invalidate_state();
         fprintf(stderr, "[GLES] back in the foreground\n");
     }
@@ -136,7 +145,12 @@ void d3d8_GetGuestScale(float *sx, float *sy) { gles_GetGuestScale(sx, sy); }
 UINT d3d8_GetBackbufferWidth(void)  { return g_gl.guest_w ? g_gl.guest_w : g_gl.width; }
 UINT d3d8_GetBackbufferHeight(void) { return g_gl.guest_h ? g_gl.guest_h : g_gl.height; }
 
-GLuint gles_draw_target(void) { return g_gl.ms_fbo ? g_gl.ms_fbo : g_gl.scene_fbo; }
+GLuint g_gles_cmp_fbo;              /* XBOX_VSH_CMP (gles_draw.c): draws go there instead */
+GLuint gles_draw_target(void)
+{
+    if (g_gles_cmp_fbo) return g_gles_cmp_fbo;
+    return g_gl.ms_fbo ? g_gl.ms_fbo : g_gl.scene_fbo;
+}
 
 static void scene_release(void)
 {
@@ -763,6 +777,7 @@ int d3d8_OcclusionPoll(int h, unsigned long long *samples)
     return 1;
 }
 void  d3d8_OcclusionRelease(int h) { if (h >= 0 && h < OCC_POOL) s_occ_busy[h] = 0; }
+int   d3d8_OcclusionIsBinary(void) { return 1; }
 float d3d8_OcclusionScale(void)
 {
     float sx, sy;

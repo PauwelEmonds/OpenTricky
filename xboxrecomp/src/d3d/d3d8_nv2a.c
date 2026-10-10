@@ -1147,3 +1147,9 @@ int d3d8_nv2a_draw_program_gpu(const Nv2aVshDraw *d)
     if (g_perf_on) { perf_add(PZ_DDRAW, perf_now() - pt); perf_gpu_draw(g_nv_maps - maps0, (unsigned)ngrp); }
     return 1;
 }
+
+/* XBOX_VSH_CMP's comparison: OpenGL ES renderer only (gles_draw.c). */
+void d3d8_nv2a_vsh_cmp(int step, unsigned long long hash) { (void)step; (void)hash; }
+
+/* D3D11 counts samples (d3d8_device.c's occlusion queries). */
+int d3d8_OcclusionIsBinary(void) { return 0; }

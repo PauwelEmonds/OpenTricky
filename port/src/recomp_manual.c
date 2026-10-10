@@ -183,6 +183,24 @@ void hook_lockrect_0016B1C0(void)
     }
 }
 
+/* XBOX_TEST_TRACK=N (testing): the track [0x1DEC90] forced as a level loads
+ * (InGameState_LoadLevel, before the original -- the write XBOX_NET_TRACK
+ * makes), so a test run reaches any course from the first one offered. With
+ * the netplay modes (recording, replay) their own hook runs after it. */
+extern void sub_000AC9B0(void);
+static int s_test_track = -2;
+static recomp_func_t s_test_track_next;
+
+static void hook_test_track_AC9B0(void)
+{
+    uint32_t ecx = g_ecx;
+    fprintf(stderr, "[TEST] XBOX_TEST_TRACK: track %u -> %d\n", MEM32(0x001DEC90u), s_test_track);
+    MEM32(0x001DEC90u) = (uint32_t)s_test_track;
+    g_ecx = ecx;
+    if (s_test_track_next) s_test_track_next();
+    else sub_000AC9B0();
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
 {
     /* Xbox D3D8 IDirect3DSurface8::LockRect -- see the note above. */
@@ -256,6 +274,18 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
     {
         recomp_func_t fn = chantfix_lookup(xbox_va);
         if (fn) return fn;
+    }
+
+    if (xbox_va == 0x000AC9B0u) {
+        if (s_test_track == -2) {
+            const char *e = getenv("XBOX_TEST_TRACK");
+            s_test_track = (e && *e) ? atoi(e) : -1;
+        }
+        if (s_test_track >= 0) {
+            if (g_np_cmdlog_on || g_np_ghost_on || g_np_net_on || g_np_rb_on || g_np_stuck_on)
+                s_test_track_next = np_cmdlog_lookup(xbox_va);
+            return hook_test_track_AC9B0;
+        }
     }
 
     /* Rider command log, only when XBOX_NETLOG=1 -- off, the

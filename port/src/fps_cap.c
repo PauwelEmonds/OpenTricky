@@ -111,6 +111,19 @@ static uint32_t race_ptr(void)
     return MEM32(lvl + 0x1Cu);
 }
 
+/* The race in progress: its state ([race+0x1C], 4 = racing) and tick
+ * counter ([race+0x18], stands still while the game is paused); -1 with no
+ * race. Any thread (the Android host reads it to pause the game on return). */
+int game_race_state(uint32_t *tick)
+{
+    uint32_t r;
+    if (!g_xbox_mem_offset) return -1;      /* the title's memory is not mapped yet */
+    r = race_ptr();
+    if (r < 0x1000u) return -1;
+    if (tick) *tick = MEM32(r + 0x18u);
+    return (int)MEM32(r + 0x1Cu);
+}
+
 /* ── guest calls ────────────────────────────────────────────────── */
 
 /* The game's WaitForSingleObject(handle, ms): 0 if signaled, 0x102 on timeout. */

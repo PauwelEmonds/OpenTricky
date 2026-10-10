@@ -44,6 +44,7 @@ void d3d8_SetPresentOverlay(void (*fn)(int w, int h));
 void touch_event(const SDL_Event *e, int screen_w, int screen_h);
 void touch_draw(int w, int h);
 int  touch_take_options(void);
+int  xinput_hle_press(const char *name, int ms);     /* xapi_input_hle.c */
 #include "fps_cap.h"
 int  d3d8_monitor_hz(HWND hwnd);
 void d3d8_SetShowFps(int on);
@@ -418,11 +419,45 @@ static unsigned sdl_key_to_vk(SDL_Keycode k)
  * renderer waits instead of drawing into nothing, and picks the surface up
  * again on return. Called on the thread that posts the event (SDL's Java
  * side), so it reaches the renderer even while the main loop is blocked. */
+/* A race running when the app went away: on return the game's own pause
+ * menu is opened (START), so the player picks up where they choose. A race
+ * already paused (its tick counter standing still) is left alone: START
+ * would resume it. race_watch samples the race on the main loop. */
+static volatile int s_race_running, s_pause_on_return, s_returned;
+static volatile Uint32 s_returned_at;
+
+static void race_watch(void)
+{
+    static uint32_t last_tick;
+    static Uint32 last_at;
+    Uint32 now = SDL_GetTicks();
+    uint32_t tick = 0;
+    int st;
+    if (now - last_at < 250u) return;
+    st = game_race_state(&tick);
+    s_race_running = st == 4 && tick != last_tick && last_at != 0;
+    last_tick = tick;
+    last_at = now;
+    /* back in front: once the renderer draws again, START */
+    if (s_pause_on_return && s_returned && now - s_returned_at > 700u) {
+        s_pause_on_return = 0;
+        xinput_hle_press("start", 150);
+        fprintf(stderr, "Back in front: the race is paused (START)\n");
+    }
+}
+
 static int SDLCALL lifecycle_watch(void *ud, SDL_Event *e)
 {
     (void)ud;
-    if (e->type == SDL_APP_WILLENTERBACKGROUND) d3d8_SetHostPaused(1);
-    else if (e->type == SDL_APP_DIDENTERFOREGROUND) d3d8_SetHostPaused(0);
+    if (e->type == SDL_APP_WILLENTERBACKGROUND) {
+        if (!s_pause_on_return) s_pause_on_return = s_race_running;
+        s_returned = 0;
+        d3d8_SetHostPaused(1);
+    } else if (e->type == SDL_APP_DIDENTERFOREGROUND) {
+        s_returned_at = SDL_GetTicks();
+        s_returned = 1;
+        d3d8_SetHostPaused(0);
+    }
     return 1;
 }
 
@@ -544,6 +579,7 @@ int host_run(int (*game_main)(void))
 
     for (;;) {
         SDL_Event e;
+        race_watch();
         if (!SDL_WaitEventTimeout(&e, 100)) continue;
         {
             int dw = 0, dh = 0;

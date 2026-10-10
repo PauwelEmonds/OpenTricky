@@ -2144,7 +2144,7 @@ static uint32_t assemble(uint32_t mode, const ProgVertex *v, const uint8_t *ok,
  * restores the old behaviour (methods ignored). */
 #define OCC_SPANS 16
 #define OCC_JOBS  64
-typedef struct { int h; int refs; int ready; unsigned long long n; } OccSpan;
+typedef struct { int h; int refs; int ready; unsigned long long n; double area; } OccSpan;
 static OccSpan  g_occ_span[256];
 static int      g_occ_open = -1;                 /* span being counted */
 static int      g_occ_cur[OCC_SPANS], g_occ_ncur;/* spans since the last clear */
@@ -2182,6 +2182,7 @@ static void occ_enable(int on)
         if (h < 0) { g_occ_dropped++; return; }
         s = h;                                    /* one span slot per query handle */
         g_occ_span[s].h = h; g_occ_span[s].refs = 1; g_occ_span[s].ready = 0; g_occ_span[s].n = 0;
+        g_occ_span[s].area = 0.0;
         g_occ_open = s;
     } else if (!on && g_occ_open >= 0) {
         d3d8_OcclusionEnd(g_occ_span[g_occ_open].h);
@@ -2189,6 +2190,38 @@ static void occ_enable(int on)
         else { occ_unref(g_occ_open); g_occ_dropped++; }
         g_occ_open = -1;
     }
+}
+
+/* A renderer that only tells whether any sample passed (OpenGL ES:
+ * d3d8_OcclusionIsBinary) would report a visible span as the whole screen.
+ * The title sizes its lens flares from the count (the sun: ~128 pixels whole,
+ * fewer partly hidden), and a count of the whole screen made the sun's glare
+ * vanish. So the area of the span's own triangles is measured here, in title
+ * pixels, on the CPU (an occlusion draw is a handful of vertices) and stands
+ * for the count when the span is visible. */
+static int g_force_cpu;                    /* defined with draw_program below */
+static void occ_note_area(const uint32_t *indices, uint32_t start, uint32_t count)
+{
+    static ProgVertex v[64], t[6 * 64];
+    static uint8_t ok[64];
+    float gw = 640.0f, gh = 480.0f;           /* the title's pixels */
+    double a = 0.0;
+    uint32_t i, n;
+    int prim = 0;
+    if (g_occ_open < 0 || g_force_cpu || count > 64 || g_pg.draw_mode < 5 || !d3d8_OcclusionIsBinary()) return;
+    for (i = 0; i < count; i++)
+        ok[i] = (uint8_t)vsh_vertex(indices ? indices[i] : start + i, &v[i], NULL);
+    n = assemble(g_pg.draw_mode, v, ok, count, t, &prim);
+    for (i = 0; i + 2 < n; i += 3) {
+        float x[3], y[3];
+        int k;
+        for (k = 0; k < 3; k++) {                 /* on the screen (a rough clip, enough for a quad) */
+            x[k] = t[i + k].x < 0.0f ? 0.0f : t[i + k].x > gw ? gw : t[i + k].x;
+            y[k] = t[i + k].y < 0.0f ? 0.0f : t[i + k].y > gh ? gh : t[i + k].y;
+        }
+        a += fabs((double)(x[1] - x[0]) * (y[2] - y[0]) - (double)(x[2] - x[0]) * (y[1] - y[0])) * 0.5;
+    }
+    g_occ_span[g_occ_open].area += a;
 }
 
 static void occ_get_report(uint32_t param)
@@ -2242,7 +2275,11 @@ void pgraph_d3d11_poll_reports(void)
                 sp->ready = 1;
                 if (r < 0) sp->n = 0;
             }
-            sum += sp->n;
+            /* any-samples renderer: a visible span counts its triangles' area */
+            if (sp->n && sp->area > 0.0 && d3d8_OcclusionIsBinary())
+                sum += (unsigned long long)(sp->area * d3d8_OcclusionScale() + 0.5);
+            else
+                sum += sp->n;
         }
         if (!done) { j++; continue; }
         {
@@ -3025,6 +3062,7 @@ static void draw_program(const uint32_t *indices, uint32_t start, uint32_t count
               && !(g_panel.on && !g_panel.scale_only && g_ph.phase == PGRAPH_PHASE_HUD)  /* panel ends: CPU */
               && gpu_prepare(&gd, indices, start, count);
     }
+    occ_note_area(indices, start, count);      /* inside an occlusion span: its area */
     if (gpu) {
         n = gd.nindices;
         prim = gd.topology;
@@ -3707,6 +3745,26 @@ static void draw_program(const uint32_t *indices, uint32_t start, uint32_t count
                     for (i = 0; i < count; i++)
                         okb[i] = (uint8_t)vsh_vertex(indices ? indices[i] : start + i, &vb[i], &psb[i]);
                     d3d8_nv2a_points_expect(tb, points_squares(vb, okb, psb, count, tb), sizeof(ProgVertex));
+                }
+                {
+                    /* XBOX_VSH_CMP=N (diagnostic, OpenGL ES): every N-th program draw
+                     * also drawn through the GPU program and the CPU path into a
+                     * scratch target, compared (d3d8_nv2a_vsh_cmp). */
+                    static int cmp = -1;
+                    static unsigned long long ncmp;
+                    if (cmp < 0) { const char *e = getenv("XBOX_VSH_CMP"); cmp = e ? atoi(e) : 0; }
+                    if (cmp > 0 && !points && ++ncmp % (unsigned)cmp == 0u) {
+                        d3d8_nv2a_vsh_cmp(0, g_pg.prog_hash);
+                        if (d3d8_nv2a_draw_program_gpu(&gd) == 1) {
+                            d3d8_nv2a_vsh_cmp(1, g_pg.prog_hash);
+                            g_force_cpu = 1;
+                            draw_program(indices, start, count);
+                            g_force_cpu = 0;
+                            d3d8_nv2a_vsh_cmp(2, g_pg.prog_hash);
+                        } else {
+                            d3d8_nv2a_vsh_cmp(3, g_pg.prog_hash);
+                        }
+                    }
                 }
                 {
                     int r = d3d8_nv2a_draw_program_gpu(&gd);
